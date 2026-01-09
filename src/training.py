@@ -207,13 +207,14 @@ def train_epoch(
     method_config,
     item2sid,
     item_embedding,
+    total_epochs=None,
 ):
-    progress_bar = tqdm(range(len(train_dataloader)))
     model.train()
     all_ids = np.arange(item2sid.shape[0]) + 1
     unseen_ids = np.setdiff1d(all_ids, seen_ids)
-
-    for batch in train_dataloader:
+    epoch_desc = f"Epoch {epoch + 1}/{total_epochs}" if total_epochs else f"Epoch {epoch + 1}"  # <-- NEW
+    progress_bar = tqdm(train_dataloader, desc=epoch_desc, leave=True)
+    for batch in progress_bar:
         optimizer.zero_grad()
 
         outputs, _ = model_forward(
@@ -255,7 +256,7 @@ def train_epoch(
 
         if scheduler is not None:
             scheduler.step()
-
+        progress_bar.set_postfix(loss=f"{loss.item():.4f}")
     progress_bar.close()
 
     logs = {
@@ -441,10 +442,10 @@ def train_tiger(
     model.train()
     total_params = sum(p.numel() for p in model.parameters())
     writer.log({"total_param": total_params})
-
+    total_epochs = int(np.ceil(total_steps / len(train_dataloader)))
     print(f"Total number of parameters: {total_params}")
     print(
-        f"Total number of epochs: {int(np.ceil(total_steps / len(train_dataloader)))}"
+        f"Total number of epochs: {total_epochs}"
     )
 
     if (
@@ -507,7 +508,7 @@ def train_tiger(
         print("Load the model from: ", state_path)
 
     for epoch in range(
-        start_epoch + 1, int(np.ceil(total_steps / len(train_dataloader)))
+        start_epoch + 1, total_epochs
     ):
         model = train_epoch(
             epoch,
@@ -524,6 +525,7 @@ def train_tiger(
             method_config,
             item2sid,
             item_embedding,
+            total_epochs=total_epochs,
         )
         global_step += len(train_dataloader)
 
