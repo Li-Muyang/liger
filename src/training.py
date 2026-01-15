@@ -472,7 +472,7 @@ def train_tiger(
     )
 
     if hasattr(torch.amp, "GradScaler"):
-        scaler = torch.amp.GradScaler("cuda")
+        scaler = torch.amp.GradScaler("mps")
     elif hasattr(torch.cuda, "amp"):
         scaler = torch.cuda.amp.GradScaler()
     else:
