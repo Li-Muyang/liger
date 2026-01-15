@@ -25,7 +25,7 @@ def model_forward(model, batch, device, n_codebook, method_config, skip_forward=
 
         item_idx_start = 1 if method_config["include_user_id"] else 0
         # Model forwarding
-        with torch.amp.autocast(device_type="cuda", dtype=torch.float16):
+        with torch.amp.autocast(device_type="mps", dtype=torch.float16):
             if method_config["flag_add_input_embedding"]:
                 inputs_embeds = model.shared(input_sids)
                 # process the input text embeddings
@@ -101,7 +101,7 @@ def model_forward(model, batch, device, n_codebook, method_config, skip_forward=
 
         item_idx_start = 0
         # Model forwarding
-        with torch.amp.autocast(device_type="cuda", dtype=torch.float16):
+        with torch.amp.autocast(device_type="mps", dtype=torch.float16):
             if method_config["flag_add_input_embedding"]:
                 inputs_embeds = model.shared(input_ids)
                 # process the input text embeddings
@@ -290,7 +290,7 @@ def evaluate(
         }
         gen_kwargs["use_cache"] = True
 
-        with torch.amp.autocast(device_type="cuda", dtype=torch.float16):
+        with torch.amp.autocast(device_type="mps", dtype=torch.float16):
             outputs = model.generate(**input_kwargs, **gen_kwargs)
         predicted_embedding = model.predicted_embedding
 
@@ -401,7 +401,7 @@ def evaluate_dense_sids(
         n_codebook = labels.shape[1]
 
         with torch.no_grad():
-            with torch.amp.autocast(device_type="cuda", dtype=torch.float16):
+            with torch.amp.autocast(device_type="mps", dtype=torch.float16):
                 _, _ = model_forward(
                     model,
                     batch,
@@ -468,7 +468,7 @@ def evaluate_dense_ids(
         n_codebook = labels.shape[1]
 
         with torch.no_grad():
-            with torch.amp.autocast(device_type="cuda", dtype=torch.float16):
+            with torch.amp.autocast(device_type="mps", dtype=torch.float16):
                 outputs, _ = model_forward(
                     model,
                     batch,
