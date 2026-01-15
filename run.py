@@ -64,7 +64,9 @@ def main(config: DictConfig) -> None:
 
     # print(config)
     device = (
-        torch.device(f"mps")
+        torch.device(f"cuda:{config['device_id']}")
+        if torch.cuda.is_available()
+        else torch.device("cpu")
     )
     set_seed(config["seed"])
 
