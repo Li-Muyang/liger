@@ -37,6 +37,42 @@ def model_forward(model, batch, device, n_codebook, method_config, skip_forward=
                 context_embedding = context_embedding.to(device)
             if context_embedding.shape[0] < method_config["date_vocab_size"]:
                 raise ValueError("context_embedding size is smaller than date vocab size.")
+            
+            # Process per-position input date contexts
+            if "input_date_ids" in batch:
+                input_date_ids = batch["input_date_ids"].to(device)  # [batch_size, max_items_per_seq]
+                # Create mask for valid (non-zero) date IDs
+                valid_mask = input_date_ids > 0  # [batch_size, max_items_per_seq]
+                # Initialize with zeros (will be ignored for padding positions)
+                input_context = torch.zeros(
+                    input_date_ids.shape[0], input_date_ids.shape[1], context_embedding.shape[-1],
+                    device=device, dtype=context_embedding.dtype
+                )
+                # Only process non-zero date IDs
+                if valid_mask.any():
+                    valid_date_ids = input_date_ids[valid_mask]  # [num_valid]
+                    valid_contexts = context_embedding[valid_date_ids - 1]  # [num_valid, embed_dim]
+                    input_context[valid_mask] = valid_contexts
+                
+                # Project to model dimension
+                context_proj = getattr(model, "context_proj", None)
+                if context_proj is not None:
+                    # Reshape for projection: [batch_size * seq_len, embed_dim]
+                    batch_size, seq_len, embed_dim = input_context.shape
+                    input_context_flat = input_context.reshape(batch_size * seq_len, embed_dim)
+                    projected_flat = context_proj(input_context_flat)
+                    model.input_context_tokens = projected_flat.reshape(batch_size, seq_len, -1)
+                    model.input_context_mask = valid_mask  # Store mask for later use
+                elif hasattr(model, "emb_proj"):
+                    batch_size, seq_len, embed_dim = input_context.shape
+                    input_context_flat = input_context.reshape(batch_size * seq_len, embed_dim)
+                    projected_flat = model.emb_proj(input_context_flat)
+                    model.input_context_tokens = projected_flat.reshape(batch_size, seq_len, -1)
+                    model.input_context_mask = valid_mask
+                else:
+                    raise AttributeError("Model has no context projection layer.")
+            
+            # Keep label context for generation (single token prepended)
             date_desc = context_embedding[label_date_ids - 1]
             context_proj = getattr(model, "context_proj", None)
             if context_proj is not None:
@@ -135,6 +171,42 @@ def model_forward(model, batch, device, n_codebook, method_config, skip_forward=
                 context_embedding = context_embedding.to(device)
             if context_embedding.shape[0] < method_config["date_vocab_size"]:
                 raise ValueError("context_embedding size is smaller than date vocab size.")
+            
+            # Process per-position input date contexts
+            if "input_date_ids" in batch:
+                input_date_ids = batch["input_date_ids"].to(device)  # [batch_size, max_items_per_seq]
+                # Create mask for valid (non-zero) date IDs
+                valid_mask = input_date_ids > 0  # [batch_size, max_items_per_seq]
+                # Initialize with zeros (will be ignored for padding positions)
+                input_context = torch.zeros(
+                    input_date_ids.shape[0], input_date_ids.shape[1], context_embedding.shape[-1],
+                    device=device, dtype=context_embedding.dtype
+                )
+                # Only process non-zero date IDs
+                if valid_mask.any():
+                    valid_date_ids = input_date_ids[valid_mask]  # [num_valid]
+                    valid_contexts = context_embedding[valid_date_ids - 1]  # [num_valid, embed_dim]
+                    input_context[valid_mask] = valid_contexts
+                
+                # Project to model dimension
+                context_proj = getattr(model, "context_proj", None)
+                if context_proj is not None:
+                    # Reshape for projection: [batch_size * seq_len, embed_dim]
+                    batch_size, seq_len, embed_dim = input_context.shape
+                    input_context_flat = input_context.reshape(batch_size * seq_len, embed_dim)
+                    projected_flat = context_proj(input_context_flat)
+                    model.input_context_tokens = projected_flat.reshape(batch_size, seq_len, -1)
+                    model.input_context_mask = valid_mask  # Store mask for later use
+                elif hasattr(model, "emb_proj"):
+                    batch_size, seq_len, embed_dim = input_context.shape
+                    input_context_flat = input_context.reshape(batch_size * seq_len, embed_dim)
+                    projected_flat = model.emb_proj(input_context_flat)
+                    model.input_context_tokens = projected_flat.reshape(batch_size, seq_len, -1)
+                    model.input_context_mask = valid_mask
+                else:
+                    raise AttributeError("Model has no context projection layer.")
+            
+            # Keep label context for generation (single token prepended)
             date_desc = context_embedding[label_date_ids - 1]
             context_proj = getattr(model, "context_proj", None)
             if context_proj is not None:
