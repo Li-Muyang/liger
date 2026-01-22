@@ -282,8 +282,11 @@ def train_tiger(
     item_embedding,
     id_save_location,
     device,
+    encoded_context=None,
+    user_timestamps=None,
+    user_ids=None,
+    date2id=None,
 ):
-
     output_path = config["output_path"]
     codebook_size = config["RQ-VAE"]["code_book_size"]
     max_items_per_seq = config["max_items_per_seq"]
@@ -297,6 +300,10 @@ def train_tiger(
         id_split["unseen_test"],
         id_split["seen"],
     )
+
+    date_vocab_size = len(date2id) if date2id else 0
+    method_config["date_vocab_size"] = date_vocab_size
+    effective_n_positions = config["n_positions"]
 
     (
         training_data,
@@ -314,14 +321,17 @@ def train_tiger(
     ) = load_data(
         id_save_location,
         user_sequence,
+        user_ids,
         unseen_val,
         unseen_test,
         seen,
         item_embedding,
         method_config,
-        max_length=config["n_positions"],
+        max_length=effective_n_positions,
         codebook_size=codebook_size,
         max_items_per_seq=max_items_per_seq,
+        user_timestamps=user_timestamps,
+        date2id=date2id,
     )
     all_semantic_ids = np.unique(
         np.concatenate(
@@ -364,6 +374,8 @@ def train_tiger(
     if method_config["use_id"] == "item_id":
         this_vocab_size = item_embedding.shape[0] + 2
 
+    method_config["date_token_offset"] = None
+
     t5_config = config["T5"]
     trainer_config = config["trainer"]
     model_config = T5Config(
@@ -379,7 +391,7 @@ def train_tiger(
         eos_token_id=int(this_vocab_size - 1),
         decoder_start_token_id=0,
         feed_forward_proj=t5_config["feed_forward_proj"],
-        n_positions=config["n_positions"],
+        n_positions=effective_n_positions,
         layer_norm_epsilon=1e-8,
         initializer_factor=t5_config["initializer_factor"],
     )
@@ -396,6 +408,12 @@ def train_tiger(
         flag_use_learnable_text_embed=method_config["flag_add_input_embedding"],
         embedding_head_dict=method_config["embedding_head_dict"],
     ).to(device)
+    if encoded_context is not None:
+        model.context_embedding = encoded_context.to(device)
+        if model.context_proj is None:
+            model.context_proj = torch.nn.Linear(
+                encoded_context.shape[-1], model_config.d_model
+            ).to(device)
 
     total_steps = trainer_config["steps"]
     batch_size = trainer_config["batch_size"]

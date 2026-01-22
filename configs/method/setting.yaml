@@ -18,4 +18,7 @@ embedding_head_dict:
   hidden_sizes: [256, 512, 768]  # flag_add_input_embedding: True
   embd_proj_dropout_rate: 0.5  # flag_add_input_embedding: True
   embd_proj_in_dropout_rate: 0.2  # flag_add_input_embedding: True
+  use_date_context: True  # set True to enable date context feature
+
+use_date_context: True  # top-level flag for date context
 

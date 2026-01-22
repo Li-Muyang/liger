@@ -551,7 +551,7 @@ def add_comma(num):
     return res_num[:-1]
 
 
-def id_map(user_items):  # user_items dict
+def id_map(user_items, user_timestamps=None):  # user_items dict
 
     user2id = {}  # raw 2 uid
     item2id = {}  # raw 2 iid
@@ -560,6 +560,7 @@ def id_map(user_items):  # user_items dict
     user_id = 1
     item_id = 1
     final_data = {}
+    user_timestamps_id = {}
     for user, items in user_items.items():
         if user not in user2id:
             user2id[user] = str(user_id)
@@ -574,6 +575,8 @@ def id_map(user_items):  # user_items dict
             iids.append(item2id[item])
         uid = user2id[user]
         final_data[uid] = iids
+        if user_timestamps:
+            user_timestamps_id[uid] = user_timestamps[user]
     data_maps = {
         "user2id": user2id,
         "item2id": item2id,
@@ -585,23 +588,26 @@ def id_map(user_items):  # user_items dict
 
 def get_interaction(datas, meta_data_set=None):
     user_seq = {}
+    user_timestamps = {}  # NEW: store timestamps
     for data in datas:
         user, item, time = data
         if meta_data_set is not None and item not in meta_data_set:
             continue
-        if user in user_seq:
-            user_seq[user].append((item, time))
-        else:
+        if user not in user_seq:
             user_seq[user] = []
-            user_seq[user].append((item, time))
+            user_timestamps[user] = []  # NEW
+        user_seq[user].append((item, time))
 
     for user, item_time in user_seq.items():
         item_time.sort(key=lambda x: x[1])
         items = []
+        timestamps = []  # NEW
         for t in item_time:
             items.append(t[0])
+            timestamps.append(t[1])  # NEW: keep timestamp
         user_seq[user] = items
-    return user_seq
+        user_timestamps[user] = timestamps  # NEW
+    return user_seq, user_timestamps  # MODIFIED return
 
 
 def list_to_str(l):
@@ -645,10 +651,10 @@ def feature_process(feature):
 
 def preprocessing(config):
     dataset_name = config["name"]
-    data_file, id2meta_file, item2attribute_file = preprocessing_each_dataset(
+    data_file, id2meta_file, item2attribute_file, user_timestamps_map = preprocessing_each_dataset(
         config, dataset_name
     )
-    return data_file, id2meta_file, item2attribute_file
+    return data_file, id2meta_file, item2attribute_file, user_timestamps_map
 
 
 def preprocessing_each_dataset(config, dataset_name):
@@ -690,13 +696,18 @@ def preprocessing_each_dataset(config, dataset_name):
         raise NotImplementedError
 
     meta_data_set = None
-    user_items = get_interaction(datas, meta_data_set)
+    user_items, user_timestamps = get_interaction(datas, meta_data_set)
     # raw_id user: [item1, item2, item3...]
 
     # filter K-core
     user_items = filter_Kcore(user_items, user_core=user_core, item_core=item_core)
+    user_timestamps = {u: user_timestamps[u] for u in user_items.keys()}
     print(f"User {user_core}-core complete! Item {item_core}-core complete!")
-    user_items_id, user_num, item_num, data_maps = id_map(user_items)
+    user_items_id, user_num, item_num, data_maps = id_map(user_items, user_timestamps)
+    user_timestamps_id = {
+        data_maps["user2id"][user]: user_timestamps[user] 
+        for user in user_items.keys()
+    }
     user_count, item_count, _ = check_Kcore(
         user_items_id, user_core=user_core, item_core=item_core
     )
@@ -778,4 +789,4 @@ def preprocessing_each_dataset(config, dataset_name):
     with open(item2attributes_file, "w") as out:
         out.write(json_str)
 
-    return data_file, id2meta_file, item2attributes_file
+    return data_file, id2meta_file, item2attributes_file, user_timestamps_id

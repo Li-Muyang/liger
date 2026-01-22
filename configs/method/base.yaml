@@ -14,4 +14,8 @@ embedding_head_dict:
   use_new_init: False
   embed_target: ground_truth
   embed_proj_type: mlp
+  text_embedding_dim: 768
+  hidden_sizes: [256, 512, 768]
+  embd_proj_dropout_rate: 0.5
+  embd_proj_in_dropout_rate: 0.2
 

@@ -14,10 +14,10 @@ import hydra
 import torch
 from ID_generation.preprocessing.data_process import preprocessing
 from ID_generation.train_rqvae import train as train_sid
-from ID_generation.utils import process_data_split, process_embeddings
+from ID_generation.utils import process_data_split, process_embeddings, encode_context
 from omegaconf import DictConfig
 from src.training import train_tiger
-
+from src.load_data import load_date_context
 from utils import set_seed
 
 
@@ -43,7 +43,9 @@ class set_dir:
         self.embedding_save_path = os.path.join(
             self.directory_processed, id_filename + "_embeddings.pt"
         )
-
+        self.context_embedding_save_path = os.path.join(
+            self.directory_processed, id_filename + "_context_embeddings.pt"
+        )
         self.result_save_dir = f"./results/{config['test_method']}/"
         os.makedirs(self.result_save_dir, exist_ok=True)
 
@@ -76,10 +78,16 @@ def main(config: DictConfig) -> None:
     is_steam = config["dataset"]["type"] == "steam"
 
     try:
-        data_file, id2meta_file, item2attribute_file = preprocessing(config["dataset"])
+        data_file, id2meta_file, item2attribute_file, user_timestamps = preprocessing(config["dataset"])
+        date_context, date2id = load_date_context(
+            filepath="/home/ec2-user/recsys/liger/ID_generation/preprocessing/raw_data/amazon/amazon_beauty_date_context.jsonl",
+            mapping_save_path=os.path.join(
+                config["dataset"]["processed_data_path"],
+                f"{config['dataset']['name']}_date2id.json",
+            ),
+        )
         # id2meta_file: the file that save item_id to meta info, we will later use it for sentence T5 embedding generation
         # data_file: the file that save the user-item interactions.
-
         train_config = {
             **config["dataset"],
             **{
@@ -96,9 +104,10 @@ def main(config: DictConfig) -> None:
                 if k not in ["logging", "dataset", "method"]
             },
         }
+        method_config["date_vocab_size"] = len(date2id) if date2id else 0
 
         # load id split
-        id_split, user_sequence = process_data_split(
+        id_split, user_sequence, user_ids = process_data_split(
             config, data_file, id2meta_file, is_steam=is_steam
         )
 
@@ -106,7 +115,7 @@ def main(config: DictConfig) -> None:
         item_embedding = process_embeddings(
             config, device, id2meta_file, PATH_CONFIG.embedding_save_path
         )
-
+        encoded_context = encode_context(config, date_context, PATH_CONFIG.context_embedding_save_path,device=device)
         train_sid(
             config, device, item_embedding, id_split, PATH_CONFIG.id_save_location
         )
@@ -120,6 +129,10 @@ def main(config: DictConfig) -> None:
             item_embedding,
             PATH_CONFIG.id_save_location,
             device=device,
+            encoded_context=encoded_context,
+            user_timestamps=user_timestamps,
+            user_ids=user_ids,
+            date2id=date2id,
         )
 
     except BaseException:

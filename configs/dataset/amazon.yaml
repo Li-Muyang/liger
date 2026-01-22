@@ -5,6 +5,7 @@ type: Amazon
 name: Beauty
 raw_data_path: ./ID_generation/preprocessing/raw_data/
 processed_data_path: ./ID_generation/preprocessing/processed/
+context_embedding_save_path: ./ID_generation/preprocessing/processed/
 max_items_per_seq: 20
 features_needed: ['title', 'price', 'brand', 'categories']
 content_model: sentence-t5-xxl

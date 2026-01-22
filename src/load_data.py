@@ -13,6 +13,53 @@ import numpy as np
 import torch
 from tqdm import trange
 
+import json
+from datetime import datetime
+
+def load_date_context(
+    filepath="/home/ec2-user/recsys/liger/ID_generation/preprocessing/raw_data/amazon/amazon_beauty_date_context.jsonl",
+    mapping_save_path=None,
+):
+    date_context = {}
+    with open(filepath, "r") as f:
+        for line in f:
+            if not line.strip():
+                continue
+            data = json.loads(line)
+            date_key = data.get("recordId")
+            if not date_key:
+                continue
+            output = data.get("modelOutput", {}).get("content", [])
+            if not output or "text" not in output[0]:
+                continue
+            date_context[date_key] = output[0]["text"]
+
+    if mapping_save_path and os.path.exists(mapping_save_path):
+        with open(mapping_save_path, "r") as f:
+            date2id = json.load(f)
+        ordered_keys = [k for k, _ in sorted(date2id.items(), key=lambda kv: kv[1])]
+        ordered_context = {k: date_context[k] for k in ordered_keys if k in date_context}
+    else:
+        ordered_keys = sorted(date_context.keys())
+        date2id = {k: i + 1 for i, k in enumerate(ordered_keys)}
+        ordered_context = {k: date_context[k] for k in ordered_keys}
+        if mapping_save_path:
+            with open(mapping_save_path, "w") as f:
+                json.dump(date2id, f)
+
+    return ordered_context, date2id
+
+
+def _timestamp_to_date_key(timestamp):
+    if isinstance(timestamp, str):
+        if len(timestamp) == 10 and timestamp[4] == "-" and timestamp[7] == "-":
+            return timestamp
+        try:
+            return datetime.fromisoformat(timestamp).strftime("%Y-%m-%d")
+        except ValueError:
+            pass
+    return datetime.utcfromtimestamp(int(timestamp)).strftime("%Y-%m-%d")
+
 
 def expand_id(id, codebook_size):
     expanded_id = list(id)
@@ -83,14 +130,15 @@ def generate_input_sequence(
     codebook_size,
     item_embedding,
     id_only,
+    timestamps=None,
 ):
+    input_sids, input_ids, attention_mask_sids, attention_mask_ids = [], [], [], []
     if user_id is not None:  # indicating that we are using user_id
-        input_sids = [user_id]
-        attention_mask_sids = [1]
-        input_ids = [user_id]
-        attention_mask_ids = [1]
-    else:
-        input_sids, input_ids, attention_mask_sids, attention_mask_ids = [], [], [], []
+        if not id_only:
+            input_sids.append(user_id)
+            attention_mask_sids.append(1)
+        input_ids.append(user_id)
+        attention_mask_ids.append(1)
 
     input_embeddings, labels_sids, labels_ids, label_embeddings = [], [], [], []
 
@@ -140,6 +188,18 @@ def generate_input_sequence(
         dim=0,
     )
 
+    # Handle timestamps
+    input_timestamps = np.zeros(max_items_per_seq, dtype=np.int64)
+    label_timestamp = 0
+    if timestamps is not None:
+        for i in range(len(user_sequence)):
+            if i == len(user_sequence) - 1:
+                label_timestamp = timestamps[i]
+            else:
+                input_timestamps[i] = timestamps[i]
+        assert len(timestamps) == len(user_sequence), "Timestamps length mismatch with user_sequence"
+        assert label_timestamp > 0, "Label timestamp should be positive"
+
     return (
         input_sids,
         input_ids,
@@ -149,11 +209,14 @@ def generate_input_sequence(
         labels_sids,
         labels_ids,
         label_embeddings,
+        input_timestamps,
+        label_timestamp,
     )
 
 
 def load_data_helper(
     user_sequence,
+    user_ids,
     unseen_val,
     unseen_test,
     item_2_semantic_id,
@@ -164,6 +227,8 @@ def load_data_helper(
     user_id_offset,
     codebook_size,
     id_only=False,
+    user_timestamps=None,
+    date2id=None,
 ):
     total_user_dict = {}
     for key in ["train", "val", "unseen_val", "test", "unseen_test"]:
@@ -173,6 +238,10 @@ def load_data_helper(
             "labels_ids": [],
             "input_embeddings": [],
             "label_embeddings": [],
+            "input_timestamps": [],
+            "label_timestamps": [],
+            "label_date_ids": [],
+            "input_date_ids": [],
         }
         if not id_only:
             total_user_dict[key]["input_sids"] = []
@@ -187,6 +256,32 @@ def load_data_helper(
             user_id = user_id_offset + i % 2000
         else:
             user_id = None
+
+        # Get timestamps for this user if available
+        user_ts = None
+        user_date_ids = None
+        if user_timestamps is not None:
+            user_id_key = user_ids[i] if user_ids is not None else str(i + 1)
+            user_id_key = str(user_id_key)
+            if user_id_key in user_timestamps:
+                user_ts = user_timestamps[user_id_key]
+                seq_len = len(user_sequence[i])
+                if len(user_ts) > seq_len:
+                    user_ts = user_ts[-seq_len:]
+                elif len(user_ts) < seq_len:
+                    raise ValueError(
+                        f"user_timestamps length mismatch for user {user_id_key}: "
+                        f"{len(user_ts)} vs {seq_len}"
+                    )
+                if date2id is not None:
+                    user_date_ids = []
+                    for ts in user_ts:
+                        date_key = _timestamp_to_date_key(ts)
+                        if date_key not in date2id:
+                            raise KeyError(
+                                f"Missing date key {date_key} in date2id mapping."
+                            )
+                        user_date_ids.append(date2id[date_key])
 
         # user sequence = [1,2,3,4,5]
         # train: j = 2,3 => [1,2], [1,2,3]
@@ -210,6 +305,8 @@ def load_data_helper(
                 labels_sids,
                 labels_ids,
                 labels_embeddings,
+                input_timestamps_seq,
+                label_timestamp,
             ) = generate_input_sequence(
                 user_id,
                 this_sequence,
@@ -219,7 +316,14 @@ def load_data_helper(
                 codebook_size,
                 item_embedding,
                 id_only,
+                timestamps=user_ts[:j] if user_ts is not None else None,
             )
+            label_date_id = (
+                user_date_ids[j - 1] if user_date_ids is not None else 0
+            )
+            input_date_ids = np.zeros(max_items_per_seq, dtype=np.int64)
+            if user_date_ids is not None:
+                input_date_ids[: j - 1] = user_date_ids[: j - 1]
             if not id_only:
                 total_user_dict[this_key]["input_sids"].append(input_sids)
                 total_user_dict[this_key]["attention_mask_sids"].append(
@@ -234,6 +338,10 @@ def load_data_helper(
             total_user_dict[this_key]["label_embeddings"].append(
                 labels_embeddings.cpu()
             )
+            total_user_dict[this_key]["input_timestamps"].append(input_timestamps_seq)
+            total_user_dict[this_key]["label_timestamps"].append(label_timestamp)
+            total_user_dict[this_key]["label_date_ids"].append(label_date_id)
+            total_user_dict[this_key]["input_date_ids"].append(input_date_ids)
 
     for key in total_user_dict.keys():
         for sub_key in total_user_dict[key].keys():
@@ -251,6 +359,13 @@ def load_data_helper(
                     )
                 else:
                     total_user_dict[key][sub_key] = torch.tensor([])
+            elif sub_key == "input_timestamps":
+                if len(total_user_dict[key][sub_key]) > 0:
+                    total_user_dict[key][sub_key] = torch.tensor(
+                        np.stack(total_user_dict[key][sub_key]), dtype=torch.long
+                    )
+                else:
+                    total_user_dict[key][sub_key] = torch.tensor([], dtype=torch.long)
             else:
                 total_user_dict[key][sub_key] = torch.tensor(
                     total_user_dict[key][sub_key], dtype=torch.long
@@ -268,6 +383,7 @@ def load_data_helper(
 def load_data(
     path,
     user_sequence,
+    user_ids,
     unseen_val,
     unseen_test,
     seen,
@@ -276,6 +392,8 @@ def load_data(
     max_length=258,
     codebook_size=256,
     max_items_per_seq=np.inf,
+    user_timestamps=None,
+    date2id=None,
 ):
     """
     :param path: path to load the semantic ID
@@ -320,6 +438,7 @@ def load_data(
     training_data, val_data, unseen_val_data, test_data, unseen_test_data = (
         load_data_helper(
             user_sequence,
+            user_ids,
             unseen_val,
             unseen_test,
             item_2_semantic_id,
@@ -329,6 +448,8 @@ def load_data(
             max_length,
             user_id_offset,
             codebook_size,
+            user_timestamps=user_timestamps,
+            date2id=date2id,
         )
     )
 
@@ -350,17 +471,21 @@ def load_data(
 
 def load_data_id(
     user_sequence,
+    user_ids,
     unseen_val,
     unseen_test,
     item_embedding,
     method_config,
     max_length=258,
     max_items_per_seq=np.inf,
+    user_timestamps=None,
+    date2id=None,
 ):
 
     training_data, val_data, unseen_val_data, test_data, unseen_test_data = (
         load_data_helper(
             user_sequence,
+            user_ids,
             unseen_val,
             unseen_test,
             None,
@@ -371,6 +496,8 @@ def load_data_id(
             None,
             None,
             id_only=True,
+            user_timestamps=user_timestamps,
+            date2id=date2id,
         )
     )
 

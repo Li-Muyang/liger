@@ -16,6 +16,61 @@ from sentence_transformers import SentenceTransformer
 from sklearn.preprocessing import StandardScaler
 from tqdm import trange
 
+def encode_context(config, date_context, context_embedding_save_path, device):
+    if os.path.exists(context_embedding_save_path):
+        context_embedding = torch.load(context_embedding_save_path, weights_only=False)
+    else:
+        print("Context embedding not found, generating context embeddings...")
+        content_model = config["dataset"]["content_model"]
+        if "sentence-t5" in content_model:
+            with torch.no_grad():
+                text_embedding_model = SentenceTransformer(
+                    f"sentence-transformers/{content_model}", device=device
+                )
+                date_descp = [value for key, value in date_context.items()]
+            bs = 512 if content_model == "sentence-t5-base" else 4
+            with torch.no_grad():
+                embeddings = text_embedding_model.encode(
+                    date_descp,
+                    convert_to_numpy=True,
+                    batch_size=bs,
+                    show_progress_bar=True,
+                )
+            with open(context_embedding_save_path, "wb") as f:
+                pickle.dump(embeddings, f)
+        elif "bert" in content_model:
+            from transformers import BertModel, BertTokenizer
+
+            tokenizer = BertTokenizer.from_pretrained("bert-base-uncased")
+            model = BertModel.from_pretrained("bert-base-uncased").to(device)
+            bs = 32
+            # embedding is generated based on the sorted text
+            date_descp = [value for key, value in date_context.items()]
+            total_length = len(date_descp)
+            embedding_list = []
+            for i in trange(total_length // bs + 1):
+                input_text = date_descp[i * bs : (i + 1) * bs]
+                with torch.no_grad():
+                    inputs = tokenizer(
+                        input_text,
+                        padding=True,
+                        truncation=True,
+                        max_length=512,
+                        return_tensors="pt",
+                    ).to(device)
+                    output = model(**inputs, return_dict=True)  # [bs, 1024]
+                    embeddings = output.last_hidden_state[:, 0]
+                    embedding_list.append(embeddings)
+
+            embeddings = torch.cat(embedding_list, dim=0).cpu().numpy()
+            with open(context_embedding_save_path, "wb") as f:
+                pickle.dump(embeddings, f)
+        else:
+            raise NotImplementedError
+        embeddings = StandardScaler().fit_transform(embeddings)
+        context_embedding = torch.Tensor(embeddings).to(device)
+        torch.save(context_embedding, context_embedding_save_path)
+    return context_embedding
 
 def process_embeddings(
     config,
@@ -103,10 +158,15 @@ def process_data_split(
         item_id_2_text[int(k)] = v
 
     user_sequence = []
+    user_ids = []
     with open(data_file, "r") as f:
         for line in f.readlines():
+            parts = line.split()
+            if not parts:
+                continue
+            user_ids.append(parts[0])
             user_sequence.append(
-                [int(x) for x in line.split(" ")[1:]]
+                [int(x) for x in parts[1:]]
             )  # this sequence only contains item ids
 
     # cut the user_sequence first before filtering out unseen val and test
@@ -117,6 +177,7 @@ def process_data_split(
 
     if is_steam:  # subsample the data for steam
         user_sequence = user_sequence[::7]
+        user_ids = user_ids[::7]
 
     val_items = []
     test_items = []
@@ -154,4 +215,4 @@ def process_data_split(
     saved_semantic_id_split["unseen_test"] = unseen_test
     saved_semantic_id_split["seen"] = train_items
 
-    return saved_semantic_id_split, user_sequence
+    return saved_semantic_id_split, user_sequence, user_ids

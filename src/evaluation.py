@@ -24,6 +24,27 @@ def model_forward(model, batch, device, n_codebook, method_config, skip_forward=
             max_length = input_text_embeddings.shape[1]
 
         item_idx_start = 1 if method_config["include_user_id"] else 0
+        if (
+            method_config.get("date_vocab_size", 0) > 0
+            and hasattr(model, "context_embedding")
+            and "label_date_ids" in batch
+        ):
+            label_date_ids = batch["label_date_ids"].to(device)
+            if torch.any(label_date_ids <= 0):
+                raise ValueError("label_date_ids must be positive.")
+            context_embedding = model.context_embedding
+            if context_embedding.device != device:
+                context_embedding = context_embedding.to(device)
+            if context_embedding.shape[0] < method_config["date_vocab_size"]:
+                raise ValueError("context_embedding size is smaller than date vocab size.")
+            date_desc = context_embedding[label_date_ids - 1]
+            context_proj = getattr(model, "context_proj", None)
+            if context_proj is not None:
+                model.context_token = context_proj(date_desc)
+            elif hasattr(model, "emb_proj"):
+                model.context_token = model.emb_proj(date_desc)
+            else:
+                raise AttributeError("Model has no context projection layer.")
         # Model forwarding
         with torch.amp.autocast(device_type="cuda", dtype=torch.float16):
             if method_config["flag_add_input_embedding"]:
@@ -41,6 +62,7 @@ def model_forward(model, batch, device, n_codebook, method_config, skip_forward=
                 proj_embd = proj_embd.reshape(
                     input_text_embeddings_shape[0], -1, proj_embd.shape[-1]
                 )
+
                 # add positional embedding
                 pos_id = torch.arange(max_length, dtype=torch.long, device=device)
                 pos_id = pos_id[:, None].repeat(1, n_codebook).reshape(-1)
@@ -99,7 +121,28 @@ def model_forward(model, batch, device, n_codebook, method_config, skip_forward=
             input_embeddings = batch["input_embeddings"].to(device).detach()
             max_length = input_embeddings.shape[1]
 
-        item_idx_start = 0
+        item_idx_start = 1 if method_config["include_user_id"] else 0
+        if (
+            method_config.get("date_vocab_size", 0) > 0
+            and hasattr(model, "context_embedding")
+            and "label_date_ids" in batch
+        ):
+            label_date_ids = batch["label_date_ids"].to(device)
+            if torch.any(label_date_ids <= 0):
+                raise ValueError("label_date_ids must be positive.")
+            context_embedding = model.context_embedding
+            if context_embedding.device != device:
+                context_embedding = context_embedding.to(device)
+            if context_embedding.shape[0] < method_config["date_vocab_size"]:
+                raise ValueError("context_embedding size is smaller than date vocab size.")
+            date_desc = context_embedding[label_date_ids - 1]
+            context_proj = getattr(model, "context_proj", None)
+            if context_proj is not None:
+                model.context_token = context_proj(date_desc)
+            elif hasattr(model, "emb_proj"):
+                model.context_token = model.emb_proj(date_desc)
+            else:
+                raise AttributeError("Model has no context projection layer.")
         # Model forwarding
         with torch.amp.autocast(device_type="cuda", dtype=torch.float16):
             if method_config["flag_add_input_embedding"]:
@@ -120,9 +163,9 @@ def model_forward(model, batch, device, n_codebook, method_config, skip_forward=
                 pos_embd = model.pos_embedding(pos_id)  # [n_seq, n_embd]
                 proj_embd += pos_embd[None, :]
                 append_embedding = torch.zeros_like(inputs_embeds)
-                append_embedding[:, item_idx_start : item_idx_start + max_length] = (
-                    proj_embd
-                )
+                append_embedding[
+                    :, item_idx_start : item_idx_start + max_length
+                ] = proj_embd
                 inputs_embeds += append_embedding
 
                 inputs_embeds = model.input_embed_layernorm(inputs_embeds)
