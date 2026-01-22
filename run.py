@@ -79,8 +79,14 @@ def main(config: DictConfig) -> None:
 
     try:
         data_file, id2meta_file, item2attribute_file, user_timestamps = preprocessing(config["dataset"])
+        
+        # Get date context file path from config, or use default
+        date_context_path = config["dataset"].get(
+            "date_context_file",
+            f"{config['dataset']['raw_data_path']}/{config['dataset']['type']}/{config['dataset']['name']}_date_context.jsonl"
+        )
         date_context, date2id = load_date_context(
-            filepath="/home/ec2-user/recsys/liger/ID_generation/preprocessing/raw_data/amazon/amazon_beauty_date_context.jsonl",
+            filepath=date_context_path,
             mapping_save_path=os.path.join(
                 config["dataset"]["processed_data_path"],
                 f"{config['dataset']['name']}_date2id.json",
