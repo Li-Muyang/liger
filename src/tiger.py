@@ -126,6 +126,15 @@ class TIGER(T5ForConditionalGeneration):
         self.semantic_pos = nn.Embedding(n_semantic_codebook + 1, config.d_model)
         self.pos_embedding = nn.Embedding(max_items_per_seq, config.d_model)
 
+        # Cross-attention layer for context fusion
+        self.context_cross_attn = nn.MultiheadAttention(
+            embed_dim=config.d_model,
+            num_heads=config.num_heads,
+            dropout=config.dropout_rate,
+            batch_first=True,
+        )
+        self.context_cross_attn_norm = nn.LayerNorm(config.d_model, eps=config.layer_norm_epsilon)
+
         if embedding_head_dict["use_new_init"]:
             # this is only applied for dense retrieval
             self.apply(self._init_weights)
@@ -205,7 +214,14 @@ class TIGER(T5ForConditionalGeneration):
             # hidden_states shape: [batch_size, seq_len, d_model]
             input_context_mask = getattr(self, "input_context_mask", None)
             
-            if input_context_tokens.shape[:2] != hidden_states.shape[:2]:
+            # Check if batch sizes match (they won't match during beam search expansion)
+            # During beam search, batch_size gets multiplied by num_beams
+            # Skip context application in this case as it was already applied in initial encoding
+            if input_context_tokens.shape[0] != hidden_states.shape[0]:
+                # Batch size mismatch (likely beam search) - skip context application
+                self.input_context_tokens = None
+                self.input_context_mask = None
+            elif input_context_tokens.shape[:2] != hidden_states.shape[:2]:
                 # If shapes don't match, we need to align them
                 # This can happen if encoder processes multiple codebooks per item
                 batch_size, hidden_seq_len, d_model = hidden_states.shape
@@ -254,7 +270,7 @@ class TIGER(T5ForConditionalGeneration):
             self.input_context_tokens = None
             self.input_context_mask = None
         
-        # Process single context token (for label, prepended to sequence)
+        # Process single context token via cross-attention (for label context)
         context_token = getattr(self, "context_token", None)
         if context_token is not None:
             if context_token.dim() == 2:
@@ -268,21 +284,15 @@ class TIGER(T5ForConditionalGeneration):
                 if hidden_states.shape[0] % context_token.shape[0] != 0:
                     raise ValueError("context_token batch mismatch with encoder outputs.")
                 context_token = context_token.repeat_interleave(repeat_factor, dim=0)
-            hidden_states = torch.cat([context_token, hidden_states], dim=1)
-            if encoder_attention_mask is None:
-                encoder_attention_mask = torch.ones(
-                    hidden_states.shape[:2],
-                    device=hidden_states.device,
-                    dtype=torch.long,
-                )
-            else:
-                ones = torch.ones(
-                    encoder_attention_mask.shape[0],
-                    1,
-                    device=encoder_attention_mask.device,
-                    dtype=encoder_attention_mask.dtype,
-                )
-                encoder_attention_mask = torch.cat([ones, encoder_attention_mask], dim=1)
+            
+            # Cross-attention: sequence attends to context (Q=seq, K=V=context)
+            attn_out, _ = self.context_cross_attn(
+                query=hidden_states,
+                key=context_token,
+                value=context_token,
+            )
+            hidden_states = self.context_cross_attn_norm(hidden_states + attn_out)
+            
             if return_dict:
                 encoder_outputs = BaseModelOutput(
                     last_hidden_state=hidden_states,
