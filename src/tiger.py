@@ -197,45 +197,6 @@ class TIGER(T5ForConditionalGeneration):
 
         hidden_states = encoder_outputs[0]
         encoder_attention_mask = attention_mask
-        
-        # Process label context token (prepended to sequence)
-        context_token = getattr(self, "context_token", None)
-        if context_token is not None:
-            if context_token.dim() == 2:
-                context_token = context_token[:, None, :]
-            if context_token.dim() != 3:
-                raise ValueError("context_token must have shape [batch, 1, d_model].")
-            if context_token.shape[2] != hidden_states.shape[2]:
-                raise ValueError("context_token shape mismatch with encoder outputs.")
-            if context_token.shape[0] != hidden_states.shape[0]:
-                repeat_factor = hidden_states.shape[0] // context_token.shape[0]
-                if hidden_states.shape[0] % context_token.shape[0] != 0:
-                    raise ValueError("context_token batch mismatch with encoder outputs.")
-                context_token = context_token.repeat_interleave(repeat_factor, dim=0)
-            hidden_states = torch.cat([context_token, hidden_states], dim=1)
-            if encoder_attention_mask is None:
-                encoder_attention_mask = torch.ones(
-                    hidden_states.shape[:2],
-                    device=hidden_states.device,
-                    dtype=torch.long,
-                )
-            else:
-                ones = torch.ones(
-                    encoder_attention_mask.shape[0],
-                    1,
-                    device=encoder_attention_mask.device,
-                    dtype=encoder_attention_mask.dtype,
-                )
-                encoder_attention_mask = torch.cat([ones, encoder_attention_mask], dim=1)
-            if return_dict:
-                encoder_outputs = BaseModelOutput(
-                    last_hidden_state=hidden_states,
-                    hidden_states=encoder_outputs.hidden_states,
-                    attentions=encoder_outputs.attentions,
-                )
-            else:
-                encoder_outputs = (hidden_states,) + encoder_outputs[1:]
-            self.context_token = None
 
         if self.model_parallel:
             torch.cuda.set_device(self.decoder.first_device)
