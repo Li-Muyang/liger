@@ -198,63 +198,7 @@ class TIGER(T5ForConditionalGeneration):
         hidden_states = encoder_outputs[0]
         encoder_attention_mask = attention_mask
         
-        # Process per-position input context tokens (new feature)
-        input_context_tokens = getattr(self, "input_context_tokens", None)
-        if input_context_tokens is not None:
-            # input_context_tokens shape: [batch_size, seq_len, d_model]
-            # hidden_states shape: [batch_size, seq_len, d_model]
-            input_context_mask = getattr(self, "input_context_mask", None)
-            
-            if input_context_tokens.shape[:2] != hidden_states.shape[:2]:
-                # If shapes don't match, we need to align them
-                # This can happen if encoder processes multiple codebooks per item
-                batch_size, hidden_seq_len, d_model = hidden_states.shape
-                context_seq_len = input_context_tokens.shape[1]
-                
-                # Calculate the expansion factor (e.g., n_codebook for SID mode)
-                if hidden_seq_len % context_seq_len == 0:
-                    expansion_factor = hidden_seq_len // context_seq_len
-                    # Expand context tokens to match hidden states length
-                    # Each context token is repeated for its corresponding codebook positions
-                    expanded_context = input_context_tokens[:, :, None, :].repeat(
-                        1, 1, expansion_factor, 1
-                    ).reshape(batch_size, hidden_seq_len, d_model)
-                    
-                    # Expand mask similarly
-                    if input_context_mask is not None:
-                        expanded_mask = input_context_mask[:, :, None].repeat(
-                            1, 1, expansion_factor
-                        ).reshape(batch_size, hidden_seq_len)
-                    else:
-                        expanded_mask = None
-                    
-                    # Add context to hidden states (only for valid positions)
-                    if expanded_mask is not None:
-                        hidden_states = hidden_states + expanded_context * expanded_mask[:, :, None]
-                    else:
-                        hidden_states = hidden_states + expanded_context
-                else:
-                    # Fallback: if we can't align, just add to matching positions
-                    min_len = min(hidden_seq_len, context_seq_len)
-                    if input_context_mask is not None:
-                        hidden_states[:, :min_len] = (
-                            hidden_states[:, :min_len] + 
-                            input_context_tokens[:, :min_len] * input_context_mask[:, :min_len, None]
-                        )
-                    else:
-                        hidden_states[:, :min_len] = hidden_states[:, :min_len] + input_context_tokens[:, :min_len]
-            else:
-                # Shapes match, directly add context to hidden states
-                if input_context_mask is not None:
-                    hidden_states = hidden_states + input_context_tokens * input_context_mask[:, :, None]
-                else:
-                    hidden_states = hidden_states + input_context_tokens
-            
-            # Clean up
-            self.input_context_tokens = None
-            self.input_context_mask = None
-        
-        # Process single context token (for label, prepended to sequence)
+        # Process label context token (prepended to sequence)
         context_token = getattr(self, "context_token", None)
         if context_token is not None:
             if context_token.dim() == 2:
@@ -292,16 +236,6 @@ class TIGER(T5ForConditionalGeneration):
             else:
                 encoder_outputs = (hidden_states,) + encoder_outputs[1:]
             self.context_token = None
-        elif input_context_tokens is not None:
-            # If we added per-position context but no label context, still update encoder_outputs
-            if return_dict:
-                encoder_outputs = BaseModelOutput(
-                    last_hidden_state=hidden_states,
-                    hidden_states=encoder_outputs.hidden_states,
-                    attentions=encoder_outputs.attentions,
-                )
-            else:
-                encoder_outputs = (hidden_states,) + encoder_outputs[1:]
 
         if self.model_parallel:
             torch.cuda.set_device(self.decoder.first_device)
