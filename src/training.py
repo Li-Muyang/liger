@@ -599,6 +599,12 @@ def train_tiger(
         flag_use_learnable_text_embed=method_config["flag_add_input_embedding"],
         embedding_head_dict=method_config["embedding_head_dict"],
     ).to(device)
+    if encoded_context is not None:
+        model.context_embedding = encoded_context.to(device)
+        if model.context_proj is None:
+            model.context_proj = torch.nn.Linear(
+                encoded_context.shape[-1], model_config.d_model
+            ).to(device)
 
     model.load_state_dict(torch.load(best_state_path), strict=True)
 
