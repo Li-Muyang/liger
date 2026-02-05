@@ -1,0 +1,18 @@
+# Out-of-Context (OOC) Evaluation Configuration
+# This config enables temporal generalization testing by holding out a specific time period
+
+# Enable OOC evaluation (set to true to activate temporal holdout)
+do_generalize_test: false
+
+# Temporal holdout range for OOC evaluation
+# Samples with labels in this date range will be held out from training
+# and used for out-of-context evaluation
+ooc_date_threshold: "2014-07-01"  # Start of Q3 2014 (inclusive)
+ooc_date_end: "2014-10-01"        # End of Q3 2014 (exclusive)
+
+# Notes:
+# - When do_generalize_test is true, all samples with label dates in [threshold, end)
+#   are excluded from train/val/test and instead go to ooc_val/ooc_test splits
+# - OOC samples are sorted by timestamp and split 50/50 into ooc_val and ooc_test
+# - This tests the model's ability to generalize to unseen temporal contexts
+# - The model will have NEVER seen date contexts from this quarter during training

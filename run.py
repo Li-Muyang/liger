@@ -121,7 +121,12 @@ def main(config: DictConfig) -> None:
         item_embedding = process_embeddings(
             config, device, id2meta_file, PATH_CONFIG.embedding_save_path
         )
-        encoded_context = encode_context(config, date_context, PATH_CONFIG.context_embedding_save_path,device=device)
+        # Use custom cache path if provided, otherwise use default
+        context_cache_path = config["dataset"].get(
+            "context_embedding_cache_path",
+            PATH_CONFIG.context_embedding_save_path
+        )
+        encoded_context = encode_context(config, date_context, context_cache_path, device=device)
         train_sid(
             config, device, item_embedding, id_split, PATH_CONFIG.id_save_location
         )

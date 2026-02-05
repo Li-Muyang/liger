@@ -177,6 +177,24 @@ def evaluate_helper(
             returned_embd_cold,
             f"uni_cold_{keyword}",
         )
+    
+    # Add OOC evaluation if enabled
+    if "ooc" in val_dataloader_dict:
+        logs, returned_cand_ooc, returned_embd_ooc = _evaluate(
+            logs, val_dataloader_dict["ooc"], f"ooc_{keyword}"
+        )
+        if method_config["flag_use_output_embedding"]:
+            logs = _dense_evaluate(
+                logs, val_dataloader_dict["ooc_embd"], f"ooc_dense_{keyword}"
+            )
+            if "test" in keyword:
+                logs = _unified_evaluate(
+                    logs,
+                    val_dataloader_dict["ooc"],
+                    returned_cand_ooc,
+                    returned_embd_ooc,
+                    f"ooc_uni_{keyword}",
+                )
 
     if (
         method_config["evaluation_method"] == "dense"
@@ -304,21 +322,22 @@ def train_tiger(
     date_vocab_size = len(date2id) if date2id else 0
     method_config["date_vocab_size"] = date_vocab_size
     effective_n_positions = config["n_positions"]
+    
+    # Check if OOC (Out-of-Context) evaluation is enabled
+    do_generalize_test = method_config.get("do_generalize_test", False)
+    ooc_config = None
+    if do_generalize_test:
+        ooc_config = {
+            "enabled": True,
+            "threshold": method_config.get("ooc_date_threshold", "2014-07-01"),
+            "end": method_config.get("ooc_date_end", "2014-10-01"),
+        }
+        print(f"\n{'='*60}")
+        print("OUT-OF-CONTEXT (OOC) EVALUATION ENABLED")
+        print(f"OOC Date Range: {ooc_config['threshold']} to {ooc_config['end']}")
+        print(f"{'='*60}\n")
 
-    (
-        training_data,
-        val_data,
-        test_data,
-        unseen_val_data,
-        unseen_test_data,
-        seen_semantic_ids,
-        val_unseen_semantic_ids,
-        test_unseen_semantic_ids,
-        max_last_semantic_ids,
-        n_semantic_codebook,
-        n_codebook,
-        item2sid,
-    ) = load_data(
+    result = load_data(
         id_save_location,
         user_sequence,
         user_ids,
@@ -332,7 +351,44 @@ def train_tiger(
         max_items_per_seq=max_items_per_seq,
         user_timestamps=user_timestamps,
         date2id=date2id,
+        ooc_config=ooc_config,
     )
+    
+    # Unpack result based on whether OOC is enabled
+    if do_generalize_test:
+        (
+            training_data,
+            val_data,
+            test_data,
+            unseen_val_data,
+            unseen_test_data,
+            ooc_val_data,
+            ooc_test_data,
+            seen_semantic_ids,
+            val_unseen_semantic_ids,
+            test_unseen_semantic_ids,
+            max_last_semantic_ids,
+            n_semantic_codebook,
+            n_codebook,
+            item2sid,
+        ) = result
+    else:
+        (
+            training_data,
+            val_data,
+            test_data,
+            unseen_val_data,
+            unseen_test_data,
+            seen_semantic_ids,
+            val_unseen_semantic_ids,
+            test_unseen_semantic_ids,
+            max_last_semantic_ids,
+            n_semantic_codebook,
+            n_codebook,
+            item2sid,
+        ) = result
+        ooc_val_data = None
+        ooc_test_data = None
     all_semantic_ids = np.unique(
         np.concatenate(
             [seen_semantic_ids, val_unseen_semantic_ids, test_unseen_semantic_ids],
@@ -354,6 +410,10 @@ def train_tiger(
     train_dataset = CustomDataset(training_data)
     val_dataset = CustomDataset(val_data)
     test_dataset = CustomDataset(test_data)
+    
+    # Create OOC datasets if enabled
+    ooc_val_dataset = CustomDataset(ooc_val_data) if do_generalize_test else None
+    ooc_test_dataset = CustomDataset(ooc_test_data) if do_generalize_test else None
 
     seen_semantic_ids = torch.from_numpy(seen_semantic_ids)
     val_unseen_semantic_ids = torch.from_numpy(val_unseen_semantic_ids)
@@ -456,6 +516,26 @@ def train_tiger(
         "cold_start": unseen_test_dataloader,
         "cold_start_embd": unseen_test_dataloader_embedding,
     }
+    
+    # Add OOC dataloaders if enabled
+    if do_generalize_test:
+        ooc_val_dataloader = DataLoader(
+            ooc_val_dataset, batch_size=eval_batch_size, shuffle=False
+        )
+        ooc_val_dataloader_embedding = DataLoader(
+            ooc_val_dataset, batch_size=eval_batch_size, shuffle=False
+        )
+        ooc_test_dataloader = DataLoader(
+            ooc_test_dataset, batch_size=eval_batch_size, shuffle=False
+        )
+        ooc_test_dataloader_embedding = DataLoader(
+            ooc_test_dataset, batch_size=eval_batch_size, shuffle=False
+        )
+        
+        val_dataloader_dict["ooc"] = ooc_val_dataloader
+        val_dataloader_dict["ooc_embd"] = ooc_val_dataloader_embedding
+        test_dataloader_dict["ooc"] = ooc_test_dataloader
+        test_dataloader_dict["ooc_embd"] = ooc_test_dataloader_embedding
 
     model.train()
     total_params = sum(p.numel() for p in model.parameters())

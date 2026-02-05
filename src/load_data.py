@@ -229,9 +229,22 @@ def load_data_helper(
     id_only=False,
     user_timestamps=None,
     date2id=None,
+    ooc_config=None,
 ):
+    # OOC (Out-of-Context) configuration for temporal generalization testing
+    do_ooc = ooc_config is not None and ooc_config.get("enabled", False)
+    ooc_threshold = ooc_config.get("threshold", "2014-07-01") if do_ooc else None
+    ooc_end = ooc_config.get("end", "2014-10-01") if do_ooc else None
+    
+    # Collect OOC samples for later 50/50 split
+    ooc_samples = [] if do_ooc else None
+    
     total_user_dict = {}
-    for key in ["train", "val", "unseen_val", "test", "unseen_test"]:
+    split_keys = ["train", "val", "unseen_val", "test", "unseen_test"]
+    if do_ooc:
+        split_keys.extend(["ooc_val", "ooc_test"])
+    
+    for key in split_keys:
         total_user_dict[key] = {
             "input_ids": [],
             "attention_mask_ids": [],
@@ -289,6 +302,8 @@ def load_data_helper(
         # test: j = 5 => [1,2,3,4,5]
         for j in range(2, len(user_sequence[i]) + 1):
             this_sequence = user_sequence[i][:j]
+            
+            # Determine the split key
             if j == len(user_sequence[i]) - 1:
                 this_key = "unseen_val" if this_sequence[-1] in unseen_val else "val"
             elif j == len(user_sequence[i]):
@@ -324,6 +339,31 @@ def load_data_helper(
             input_date_ids = np.zeros(max_items_per_seq, dtype=np.int64)
             if user_date_ids is not None:
                 input_date_ids[: j - 1] = user_date_ids[: j - 1]
+            
+            # OOC filtering: Check if this sample should be in OOC set
+            is_ooc_sample = False
+            if do_ooc and label_timestamp > 0:
+                label_date_key = _timestamp_to_date_key(label_timestamp)
+                if label_date_key >= ooc_threshold and label_date_key < ooc_end:
+                    is_ooc_sample = True
+                    # Collect OOC sample for later 50/50 split
+                    ooc_samples.append({
+                        "input_sids": input_sids,
+                        "input_ids": input_ids,
+                        "input_embeddings": input_embeddings,
+                        "attention_mask_sids": attention_mask_sids,
+                        "attention_mask_ids": attention_mask_ids,
+                        "labels_sids": labels_sids,
+                        "labels_ids": labels_ids,
+                        "labels_embeddings": labels_embeddings,
+                        "input_timestamps_seq": input_timestamps_seq,
+                        "label_timestamp": label_timestamp,
+                        "label_date_id": label_date_id,
+                        "input_date_ids": input_date_ids,
+                    })
+                    # Skip adding to train/val/test - will be added to OOC splits later
+                    continue
+            
             if not id_only:
                 total_user_dict[this_key]["input_sids"].append(input_sids)
                 total_user_dict[this_key]["attention_mask_sids"].append(
@@ -342,6 +382,37 @@ def load_data_helper(
             total_user_dict[this_key]["label_timestamps"].append(label_timestamp)
             total_user_dict[this_key]["label_date_ids"].append(label_date_id)
             total_user_dict[this_key]["input_date_ids"].append(input_date_ids)
+    
+    # Process OOC samples: sort by timestamp and split 50/50
+    if do_ooc and ooc_samples:
+        print(f"Processing {len(ooc_samples)} OOC samples...")
+        # Sort by label timestamp
+        ooc_samples.sort(key=lambda x: x["label_timestamp"])
+        
+        # Split 50/50
+        mid_point = len(ooc_samples) // 2
+        ooc_val_samples = ooc_samples[:mid_point]
+        ooc_test_samples = ooc_samples[mid_point:]
+        
+        print(f"OOC Val: {len(ooc_val_samples)}, OOC Test: {len(ooc_test_samples)}")
+        
+        # Add to total_user_dict
+        for ooc_key, ooc_sample_list in [("ooc_val", ooc_val_samples), ("ooc_test", ooc_test_samples)]:
+            for sample in ooc_sample_list:
+                if not id_only:
+                    total_user_dict[ooc_key]["input_sids"].append(sample["input_sids"])
+                    total_user_dict[ooc_key]["attention_mask_sids"].append(sample["attention_mask_sids"])
+                    total_user_dict[ooc_key]["labels_sids"].append(sample["labels_sids"])
+                
+                total_user_dict[ooc_key]["input_ids"].append(sample["input_ids"])
+                total_user_dict[ooc_key]["input_embeddings"].append(sample["input_embeddings"].cpu())
+                total_user_dict[ooc_key]["attention_mask_ids"].append(sample["attention_mask_ids"])
+                total_user_dict[ooc_key]["labels_ids"].append(sample["labels_ids"])
+                total_user_dict[ooc_key]["label_embeddings"].append(sample["labels_embeddings"].cpu())
+                total_user_dict[ooc_key]["input_timestamps"].append(sample["input_timestamps_seq"])
+                total_user_dict[ooc_key]["label_timestamps"].append(sample["label_timestamp"])
+                total_user_dict[ooc_key]["label_date_ids"].append(sample["label_date_id"])
+                total_user_dict[ooc_key]["input_date_ids"].append(sample["input_date_ids"])
 
     for key in total_user_dict.keys():
         for sub_key in total_user_dict[key].keys():
@@ -371,13 +442,24 @@ def load_data_helper(
                     total_user_dict[key][sub_key], dtype=torch.long
                 )
 
-    return (
-        total_user_dict["train"],
-        total_user_dict["val"],
-        total_user_dict["unseen_val"],
-        total_user_dict["test"],
-        total_user_dict["unseen_test"],
-    )
+    if do_ooc:
+        return (
+            total_user_dict["train"],
+            total_user_dict["val"],
+            total_user_dict["unseen_val"],
+            total_user_dict["test"],
+            total_user_dict["unseen_test"],
+            total_user_dict["ooc_val"],
+            total_user_dict["ooc_test"],
+        )
+    else:
+        return (
+            total_user_dict["train"],
+            total_user_dict["val"],
+            total_user_dict["unseen_val"],
+            total_user_dict["test"],
+            total_user_dict["unseen_test"],
+        )
 
 
 def load_data(
@@ -394,6 +476,7 @@ def load_data(
     max_items_per_seq=np.inf,
     user_timestamps=None,
     date2id=None,
+    ooc_config=None,
 ):
     """
     :param path: path to load the semantic ID
@@ -402,6 +485,7 @@ def load_data(
     :param item_embedding: [n_item, n_embd], where n_embd is sentence-T5 embedding dimension
     :param max_length: for the generated sequence
     :param max_items_per_seq: number of items in each sequence
+    :param ooc_config: Optional dict for out-of-context evaluation config
     """
     n_semantic_codebook = 3
 
@@ -435,38 +519,60 @@ def load_data(
         )
 
     user_id_offset = 1 + n_semantic_codebook * codebook_size + last_codebook_size
-    training_data, val_data, unseen_val_data, test_data, unseen_test_data = (
-        load_data_helper(
-            user_sequence,
-            user_ids,
-            unseen_val,
-            unseen_test,
-            item_2_semantic_id,
-            item_embedding,
-            method_config,
-            max_items_per_seq,
-            max_length,
-            user_id_offset,
-            codebook_size,
-            user_timestamps=user_timestamps,
-            date2id=date2id,
+    
+    # Call load_data_helper with ooc_config
+    result = load_data_helper(
+        user_sequence,
+        user_ids,
+        unseen_val,
+        unseen_test,
+        item_2_semantic_id,
+        item_embedding,
+        method_config,
+        max_items_per_seq,
+        max_length,
+        user_id_offset,
+        codebook_size,
+        user_timestamps=user_timestamps,
+        date2id=date2id,
+        ooc_config=ooc_config,
+    )
+    
+    # Unpack result based on whether OOC is enabled
+    if ooc_config and ooc_config.get("enabled", False):
+        training_data, val_data, unseen_val_data, test_data, unseen_test_data, ooc_val_data, ooc_test_data = result
+        return (
+            training_data,
+            val_data,
+            test_data,
+            unseen_val_data,
+            unseen_test_data,
+            ooc_val_data,
+            ooc_test_data,
+            seen_semantic_ids,
+            val_unseen_semantic_ids,
+            test_unseen_semantic_ids,
+            max_last_semantic_ids,
+            n_semantic_codebook,
+            n_codebook,
+            all_semantic_ids,
         )
-    )
-
-    return (
-        training_data,
-        val_data,
-        test_data,
-        unseen_val_data,
-        unseen_test_data,
-        seen_semantic_ids,
-        val_unseen_semantic_ids,
-        test_unseen_semantic_ids,
-        max_last_semantic_ids,
-        n_semantic_codebook,
-        n_codebook,
-        all_semantic_ids,
-    )
+    else:
+        training_data, val_data, unseen_val_data, test_data, unseen_test_data = result
+        return (
+            training_data,
+            val_data,
+            test_data,
+            unseen_val_data,
+            unseen_test_data,
+            seen_semantic_ids,
+            val_unseen_semantic_ids,
+            test_unseen_semantic_ids,
+            max_last_semantic_ids,
+            n_semantic_codebook,
+            n_codebook,
+            all_semantic_ids,
+        )
 
 
 def load_data_id(
@@ -480,25 +586,28 @@ def load_data_id(
     max_items_per_seq=np.inf,
     user_timestamps=None,
     date2id=None,
+    ooc_config=None,
 ):
-
-    training_data, val_data, unseen_val_data, test_data, unseen_test_data = (
-        load_data_helper(
-            user_sequence,
-            user_ids,
-            unseen_val,
-            unseen_test,
-            None,
-            item_embedding,
-            method_config,
-            max_items_per_seq,
-            max_length,
-            None,
-            None,
-            id_only=True,
-            user_timestamps=user_timestamps,
-            date2id=date2id,
-        )
+    result = load_data_helper(
+        user_sequence,
+        user_ids,
+        unseen_val,
+        unseen_test,
+        None,
+        item_embedding,
+        method_config,
+        max_items_per_seq,
+        max_length,
+        None,
+        None,
+        id_only=True,
+        user_timestamps=user_timestamps,
+        date2id=date2id,
+        ooc_config=ooc_config,
     )
-
-    return training_data, val_data, test_data, unseen_val_data, unseen_test_data
+    
+    # Return with or without OOC data based on config
+    if ooc_config and ooc_config.get("enabled", False):
+        return result  # (train, val, unseen_val, test, unseen_test, ooc_val, ooc_test)
+    else:
+        return result  # (train, val, unseen_val, test, unseen_test)
