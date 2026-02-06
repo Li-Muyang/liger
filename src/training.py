@@ -139,25 +139,32 @@ def evaluate_helper(
         return logs
 
     if "test" in keyword:
+        print(f"[DEBUG] Running IC test evaluation (keyword={keyword})...")
         logs, returned_cand_in, returned_embd_in = _evaluate(
             logs, val_dataloader_dict["in_set"], f"genret_in_{keyword}"
         )
+        print(f"[DEBUG] After IC in_set eval: {len([k for k in logs.keys() if 'genret_in' in k])} IC metrics")
         logs, returned_cand_cold, returned_embd_cold = _evaluate(
             logs, val_dataloader_dict["cold_start"], f"genret_cold_{keyword}"
         )
+        print(f"[DEBUG] After IC cold_start eval: {len([k for k in logs.keys() if 'genret_cold' in k])} cold metrics")
 
         if method_config["flag_use_output_embedding"]:
             logs = _dense_evaluate(
                 logs, val_dataloader_dict["in_set_embd"], f"dense_in_{keyword}"
             )
+            print(f"[DEBUG] After dense eval: {len([k for k in logs.keys() if 'dense_in' in k])} dense metrics")
     else:  # during training, do selected eval
+        print(f"[DEBUG] Running IC val evaluation (keyword={keyword})...")
         logs, returned_cand_in, returned_embd_in = _evaluate(
             logs, val_dataloader_dict["in_set"], f"genret_in_{keyword}"
         )
+        print(f"[DEBUG] After IC in_set eval: {len([k for k in logs.keys() if 'genret_in' in k])} IC metrics")
         if method_config["flag_use_output_embedding"]:
             logs = _dense_evaluate(
                 logs, val_dataloader_dict["in_set_embd"], f"dense_in_{keyword}"
             )
+            print(f"[DEBUG] After dense eval: {len([k for k in logs.keys() if 'dense_in' in k])} dense metrics")
 
     if method_config["flag_use_output_embedding"] and "test" in keyword:
         logs = _dense_evaluate(
@@ -180,9 +187,11 @@ def evaluate_helper(
     
     # Add OOC evaluation if enabled
     if "ooc" in val_dataloader_dict:
+        print(f"[DEBUG] Running OOC evaluation (keyword={keyword})...")
         logs, returned_cand_ooc, returned_embd_ooc = _evaluate(
             logs, val_dataloader_dict["ooc"], f"ooc_{keyword}"
         )
+        print(f"[DEBUG] After OOC eval: {len([k for k in logs.keys() if 'ooc' in k])} OOC metrics")
         if method_config["flag_use_output_embedding"]:
             logs = _dense_evaluate(
                 logs, val_dataloader_dict["ooc_embd"], f"ooc_dense_{keyword}"
@@ -195,6 +204,8 @@ def evaluate_helper(
                     returned_embd_ooc,
                     f"ooc_uni_{keyword}",
                 )
+        print(f"[DEBUG] Total metrics in logs: {len(logs)}")
+        print(f"[DEBUG] Metric keys: {list(logs.keys())}")
 
     if (
         method_config["evaluation_method"] == "dense"
@@ -325,6 +336,7 @@ def train_tiger(
     
     # Check if OOC (Out-of-Context) evaluation is enabled
     do_generalize_test = method_config.get("do_generalize_test", False)
+    print(f"[DEBUG] do_generalize_test = {do_generalize_test}")
     ooc_config = None
     if do_generalize_test:
         ooc_config = {
@@ -336,6 +348,8 @@ def train_tiger(
         print("OUT-OF-CONTEXT (OOC) EVALUATION ENABLED")
         print(f"OOC Date Range: {ooc_config['threshold']} to {ooc_config['end']}")
         print(f"{'='*60}\n")
+    else:
+        print("[DEBUG] OOC evaluation is disabled")
 
     result = load_data(
         id_save_location,
