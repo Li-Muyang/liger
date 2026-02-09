@@ -387,11 +387,12 @@ def load_data_helper(
             total_user_dict[this_key]["label_date_ids"].append(label_date_id)
             total_user_dict[this_key]["input_date_ids"].append(input_date_ids)
     
-    # Process OOC samples: sort by timestamp and split 50/50
+    # Process OOC samples: random shuffle and split 50/50
     if do_ooc and ooc_samples:
         print(f"Processing {len(ooc_samples)} OOC samples...")
-        # Sort by label timestamp
-        ooc_samples.sort(key=lambda x: x["label_timestamp"])
+        # Random shuffle to avoid temporal bias within OOC period
+        import random
+        random.shuffle(ooc_samples)
         
         # Split 50/50
         mid_point = len(ooc_samples) // 2
