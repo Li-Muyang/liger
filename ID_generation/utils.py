@@ -17,6 +17,10 @@ from sklearn.preprocessing import StandardScaler
 from tqdm import trange
 
 def encode_context(config, date_context, context_embedding_save_path, device):
+    # Handle empty or None date_context (when context is disabled)
+    if not date_context or len(date_context) == 0:
+        return None
+    
     if os.path.exists(context_embedding_save_path):
         context_embedding = torch.load(context_embedding_save_path, weights_only=False)
     else:

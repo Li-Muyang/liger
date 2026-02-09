@@ -85,13 +85,19 @@ def main(config: DictConfig) -> None:
             "date_context_file",
             f"{config['dataset']['raw_data_path']}/{config['dataset']['type']}/{config['dataset']['name']}_date_context.jsonl"
         )
-        date_context, date2id = load_date_context(
-            filepath=date_context_path,
-            mapping_save_path=os.path.join(
-                config["dataset"]["processed_data_path"],
-                f"{config['dataset']['name']}_date2id.json",
-            ),
-        )
+        
+        # Load date context if file path is provided and not disabled
+        date_context, date2id, encoded_context = {}, None, None
+        if date_context_path not in [None, "null", ""]:
+            date_context, date2id = load_date_context(
+                filepath=date_context_path,
+                mapping_save_path=os.path.join(
+                    config["dataset"]["processed_data_path"],
+                    f"{config['dataset']['name']}_date2id.json",
+                ),
+            )
+        else:
+            print("Context loading disabled (date_context_file=null)")
         # id2meta_file: the file that save item_id to meta info, we will later use it for sentence T5 embedding generation
         # data_file: the file that save the user-item interactions.
         train_config = {
@@ -121,12 +127,15 @@ def main(config: DictConfig) -> None:
         item_embedding = process_embeddings(
             config, device, id2meta_file, PATH_CONFIG.embedding_save_path
         )
-        # Use custom cache path if provided, otherwise use default
-        context_cache_path = config["dataset"].get(
-            "context_embedding_cache_path",
-            PATH_CONFIG.context_embedding_save_path
-        )
-        encoded_context = encode_context(config, date_context, context_cache_path, device=device)
+        # Encode context only if date_context was loaded
+        if date_context and len(date_context) > 0:
+            context_cache_path = config["dataset"].get(
+                "context_embedding_cache_path",
+                PATH_CONFIG.context_embedding_save_path
+            )
+            encoded_context = encode_context(config, date_context, context_cache_path, device=device)
+        else:
+            encoded_context = None
         train_sid(
             config, device, item_embedding, id_split, PATH_CONFIG.id_save_location
         )

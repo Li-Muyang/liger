@@ -20,6 +20,10 @@ def load_date_context(
     filepath="/home/ec2-user/recsys/liger/ID_generation/preprocessing/raw_data/amazon/amazon_beauty_date_context.jsonl",
     mapping_save_path=None,
 ):
+    # Handle None or "null" filepath (when context is disabled)
+    if filepath is None or filepath == "null" or filepath == "":
+        return {}, None
+    
     date_context = {}
     with open(filepath, "r") as f:
         for line in f:

@@ -138,33 +138,30 @@ def evaluate_helper(
                     )
         return logs
 
+    # Always run IC evaluation first (regardless of OOC)
+    print(f"[DEBUG] Running IC evaluation (keyword={keyword})...")
+    
     if "test" in keyword:
-        print(f"[DEBUG] Running IC test evaluation (keyword={keyword})...")
         logs, returned_cand_in, returned_embd_in = _evaluate(
             logs, val_dataloader_dict["in_set"], f"genret_in_{keyword}"
         )
-        print(f"[DEBUG] After IC in_set eval: {len([k for k in logs.keys() if 'genret_in' in k])} IC metrics")
         logs, returned_cand_cold, returned_embd_cold = _evaluate(
             logs, val_dataloader_dict["cold_start"], f"genret_cold_{keyword}"
         )
-        print(f"[DEBUG] After IC cold_start eval: {len([k for k in logs.keys() if 'genret_cold' in k])} cold metrics")
-
         if method_config["flag_use_output_embedding"]:
             logs = _dense_evaluate(
                 logs, val_dataloader_dict["in_set_embd"], f"dense_in_{keyword}"
             )
-            print(f"[DEBUG] After dense eval: {len([k for k in logs.keys() if 'dense_in' in k])} dense metrics")
     else:  # during training, do selected eval
-        print(f"[DEBUG] Running IC val evaluation (keyword={keyword})...")
         logs, returned_cand_in, returned_embd_in = _evaluate(
             logs, val_dataloader_dict["in_set"], f"genret_in_{keyword}"
         )
-        print(f"[DEBUG] After IC in_set eval: {len([k for k in logs.keys() if 'genret_in' in k])} IC metrics")
         if method_config["flag_use_output_embedding"]:
             logs = _dense_evaluate(
                 logs, val_dataloader_dict["in_set_embd"], f"dense_in_{keyword}"
             )
-            print(f"[DEBUG] After dense eval: {len([k for k in logs.keys() if 'dense_in' in k])} dense metrics")
+    
+    print(f"[DEBUG] IC metrics logged: {[k for k in logs.keys() if not k.startswith('ooc')]}")
 
     if method_config["flag_use_output_embedding"] and "test" in keyword:
         logs = _dense_evaluate(
@@ -185,13 +182,12 @@ def evaluate_helper(
             f"uni_cold_{keyword}",
         )
     
-    # Add OOC evaluation if enabled
+    # Add OOC evaluation if enabled (appends to IC metrics)
     if "ooc" in val_dataloader_dict:
-        print(f"[DEBUG] Running OOC evaluation (keyword={keyword})...")
+        print(f"[DEBUG] Running OOC evaluation...")
         logs, returned_cand_ooc, returned_embd_ooc = _evaluate(
             logs, val_dataloader_dict["ooc"], f"ooc_{keyword}"
         )
-        print(f"[DEBUG] After OOC eval: {len([k for k in logs.keys() if 'ooc' in k])} OOC metrics")
         if method_config["flag_use_output_embedding"]:
             logs = _dense_evaluate(
                 logs, val_dataloader_dict["ooc_embd"], f"ooc_dense_{keyword}"
@@ -204,8 +200,9 @@ def evaluate_helper(
                     returned_embd_ooc,
                     f"ooc_uni_{keyword}",
                 )
-        print(f"[DEBUG] Total metrics in logs: {len(logs)}")
-        print(f"[DEBUG] Metric keys: {list(logs.keys())}")
+        print(f"[DEBUG] OOC metrics logged: {[k for k in logs.keys() if k.startswith('ooc')]}")
+    
+    print(f"[DEBUG] Final log keys ({len(logs)} total): {list(logs.keys())}")
 
     if (
         method_config["evaluation_method"] == "dense"
