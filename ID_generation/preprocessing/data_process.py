@@ -40,6 +40,91 @@ def download_file(url, path):
         print(f"Failed to download {os.path.basename(path)}")
 
 
+class Yelp:
+    """
+    Process LETTER-format Yelp data into liger pipeline format.
+    Yelp data comes pre-processed from LETTER repo with:
+    - Yelp.inter.json: User-item interaction sequences
+    - Yelp.item.json: Item metadata (title, description/categories)
+    """
+    def __init__(self, root):
+        self.root = os.path.abspath(root)
+        self.data_path = os.path.join(root, "Yelp")
+        
+    def process(self):
+        """
+        Load Yelp.inter.json and convert to (user, item, timestamp) format.
+        
+        LETTER format: {"user_id": [item_id1, item_id2, ...]}
+        Output: List of (user_id, item_id, timestamp) tuples
+        
+        Note: Since LETTER data doesn't include timestamps, we use sequential
+        ordering (1, 2, 3, ...) to maintain interaction order.
+        """
+        inter_file = os.path.join(self.data_path, "Yelp.inter.json")
+        
+        if not os.path.exists(inter_file):
+            raise FileNotFoundError(
+                f"Yelp interaction file not found: {inter_file}\n"
+                f"Please copy Yelp.inter.json from LETTER repo to {self.data_path}/"
+            )
+        
+        print(f"Loading Yelp interactions from {inter_file}")
+        with open(inter_file, 'r') as f:
+            interactions = json.load(f)
+        
+        datas = []
+        # LETTER format: {"user_id": [item1, item2, ...]}
+        # Convert to (user, item, timestamp) format with sequential timestamps
+        for user_id, items in interactions.items():
+            # Use sequential timestamps to maintain order
+            for idx, item_id in enumerate(items):
+                timestamp = idx + 1  # Sequential ordering starting from 1
+                # Keep user_id and item_id as strings (will be mapped by id_map later)
+                datas.append((str(user_id), str(item_id), timestamp))
+        
+        print(f"Loaded {len(datas)} interactions from {len(interactions)} users")
+        return datas
+    
+    def process_meta(self, data_maps):
+        """
+        Load Yelp.item.json and create metadata dict.
+        
+        LETTER format: {"item_id": {"title": "...", "description": "..."}}
+        Output: Dict of {item_id: metadata_dict}
+        """
+        item_file = os.path.join(self.data_path, "Yelp.item.json")
+        
+        if not os.path.exists(item_file):
+            raise FileNotFoundError(
+                f"Yelp item file not found: {item_file}\n"
+                f"Please copy Yelp.item.json from LETTER repo to {self.data_path}/"
+            )
+        
+        print(f"Loading Yelp item metadata from {item_file}")
+        with open(item_file, 'r') as f:
+            items_raw = json.load(f)
+        
+        datas = {}
+        item_ids = set(data_maps["item2id"].keys())
+        
+        for item_id_str, meta in items_raw.items():
+            if item_id_str not in item_ids:
+                continue
+            
+            # LETTER format: {"title": "Business Name", "description": "Cat1, Cat2, ..."}
+            # Convert to format compatible with liger's meta_map
+            datas[item_id_str] = {
+                "title": meta.get("title", "Unknown Business"),
+                "description": meta.get("description", ""),
+                # Parse categories from comma-separated description
+                "categories": [cat.strip() for cat in meta.get("description", "").split(", ") if cat.strip()]
+            }
+        
+        print(f"Loaded metadata for {len(datas)} items")
+        return datas
+
+
 class Amazon:
     def __init__(self, root, dataset_name, rating_score):
         self.root = os.path.abspath(root)
@@ -466,6 +551,13 @@ def meta_map(
                 )
             if "tags" in keys:
                 meta_text += f"Tags of the game include: {meta['tags']}. "
+        
+        elif prompt_format == "yelp":
+            # Yelp business format
+            if "title" in keys and meta["title"] != "":
+                meta_text += f"This business is '{meta['title']}'. "
+            if "description" in keys and meta["description"] != "":
+                meta_text += f"Categories: {meta['description']}. "
 
         if (
             prompt_format == "steam"
@@ -692,6 +784,9 @@ def preprocessing_each_dataset(config, dataset_name):
     elif data_type == "steam":
         dataset = Steam(raw_data_path, user_core)
         datas = dataset.sequence_raw
+    elif data_type == "Yelp":
+        dataset = Yelp(raw_data_path)
+        datas = dataset.process()
     else:
         raise NotImplementedError
 
@@ -761,6 +856,21 @@ def preprocessing_each_dataset(config, dataset_name):
             meta_infos,
             data_maps["item2id"],
             None,
+            features_needed,
+            attribute_core,
+            prompt_format,
+        )
+    elif data_type == "Yelp":
+        meta_infos = dataset.process_meta(data_maps)
+        # Yelp doesn't have brand/genre attributes like Amazon/Steam
+        # Skip attribute extraction, just create id2meta mapping
+        item2attributes = {}
+        attribute_num = 0
+        avg_attribute = 0.0
+        id2meta = meta_map(
+            meta_infos,
+            data_maps["item2id"],
+            None,  # No attributes for Yelp
             features_needed,
             attribute_core,
             prompt_format,
