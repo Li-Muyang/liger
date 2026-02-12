@@ -16,7 +16,7 @@ from ID_generation.preprocessing.data_process import preprocessing
 from ID_generation.train_rqvae import train as train_sid
 from ID_generation.utils import process_data_split, process_embeddings, encode_context
 from omegaconf import DictConfig
-from src.training import train_tiger
+from src.training import train_tiger, pretrain_context_projector
 from src.load_data import load_date_context
 from utils import set_seed
 
@@ -140,20 +140,40 @@ def main(config: DictConfig) -> None:
             config, device, item_embedding, id_split, PATH_CONFIG.id_save_location
         )
 
-        train_tiger(
-            config,
-            train_config,
-            method_config,
-            id_split,
-            user_sequence,
-            item_embedding,
-            PATH_CONFIG.id_save_location,
-            device=device,
-            encoded_context=encoded_context,
-            user_timestamps=user_timestamps,
-            user_ids=user_ids,
-            date2id=date2id,
-        )
+        training_stage = method_config.get("training_stage", "regular")
+
+        if training_stage == "pretrain_context":
+            # Stage 1: Pre-train context projector only
+            pretrain_context_projector(
+                config,
+                train_config,
+                method_config,
+                id_split,
+                user_sequence,
+                item_embedding,
+                PATH_CONFIG.id_save_location,
+                device=device,
+                encoded_context=encoded_context,
+                user_timestamps=user_timestamps,
+                user_ids=user_ids,
+                date2id=date2id,
+            )
+        else:
+            # "regular" or "finetune_with_context" (Stage 2)
+            train_tiger(
+                config,
+                train_config,
+                method_config,
+                id_split,
+                user_sequence,
+                item_embedding,
+                PATH_CONFIG.id_save_location,
+                device=device,
+                encoded_context=encoded_context,
+                user_timestamps=user_timestamps,
+                user_ids=user_ids,
+                date2id=date2id,
+            )
 
     except BaseException:
         traceback.print_exc(file=sys.stderr)
