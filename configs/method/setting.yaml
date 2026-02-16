@@ -22,9 +22,10 @@ embedding_head_dict:
 
 use_date_context: True  # top-level flag for date context
 
-# Context projector pre-training (Stage 1)
+# Context projector pre-training
 # training_stage: "regular" (no staging), "pretrain_context" (Stage 1), "finetune_with_context" (Stage 2)
 training_stage: "regular"
+pretrain_context_proj_path: null  # path to Stage 1 output context_proj.pt (for Stage 2)
 pretrain_context_proj_config:
   backbone_checkpoint: null  # path to pre-trained backbone checkpoint (required for Stage 1)
   steps: 50000

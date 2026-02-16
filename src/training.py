@@ -753,13 +753,23 @@ def train_tiger(
                 encoded_context.shape[-1], model_config.d_model
             ).to(device)
 
-    # Stage 2: Load pre-trained context_proj if available
+    # Stage 2: Load backbone + pre-trained context_proj
     training_stage = method_config.get("training_stage", "regular")
     if training_stage == "finetune_with_context":
+        # Load backbone first
+        backbone_path = method_config.get("pretrain_context_proj_config", {}).get("backbone_checkpoint", None)
+        if backbone_path and os.path.exists(backbone_path):
+            backbone_state = torch.load(backbone_path, map_location=device, weights_only=False)
+            if "model_state_dict" in backbone_state:
+                backbone_state = backbone_state["model_state_dict"]
+            model.load_state_dict(backbone_state, strict=False)
+            print(f"[Stage 2] Loaded backbone from {backbone_path}")
+        else:
+            print(f"[Stage 2] WARNING: backbone_checkpoint not found, using random init")
+
+        # Then load pre-trained context_proj
         pretrain_proj_path = method_config.get("pretrain_context_proj_path", None)
-        if pretrain_proj_path is None:
-            pretrain_proj_path = os.path.join(output_path, "pretrain_context_proj.pt")
-        if os.path.exists(pretrain_proj_path):
+        if pretrain_proj_path and os.path.exists(pretrain_proj_path):
             model.context_proj.load_state_dict(
                 torch.load(pretrain_proj_path, map_location=device, weights_only=False)
             )

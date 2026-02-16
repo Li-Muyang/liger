@@ -14,7 +14,7 @@ import hydra
 import torch
 from ID_generation.preprocessing.data_process import preprocessing
 from ID_generation.train_rqvae import train as train_sid
-from ID_generation.utils import process_data_split, process_embeddings, encode_context
+from ID_generation.utils import process_data_split, process_embeddings, encode_context_text, encode_context_with_rqvae
 from omegaconf import DictConfig
 from src.training import train_tiger, pretrain_context_projector
 from src.load_data import load_date_context
@@ -127,18 +127,27 @@ def main(config: DictConfig) -> None:
         item_embedding = process_embeddings(
             config, device, id2meta_file, PATH_CONFIG.embedding_save_path
         )
-        # Encode context only if date_context was loaded
+        # Encode context text into sentence embeddings (768d)
+        context_text_embedding = None
         if date_context and len(date_context) > 0:
-            context_cache_path = config["dataset"].get(
-                "context_embedding_cache_path",
-                PATH_CONFIG.context_embedding_save_path
+            context_text_embedding = encode_context_text(
+                config, date_context, PATH_CONFIG.context_embedding_save_path, device=device
             )
-            encoded_context = encode_context(config, date_context, context_cache_path, device=device)
-        else:
-            encoded_context = None
+
         train_sid(
             config, device, item_embedding, id_split, PATH_CONFIG.id_save_location
         )
+
+        # Encode context through RQ-VAE encoder to align with item latent space
+        encoded_context = None
+        if context_text_embedding is not None:
+            rqvae_model_path = f"{PATH_CONFIG.id_save_location}_model.pt"
+            rqvae_cache_path = PATH_CONFIG.context_embedding_save_path.replace(
+                "_context_embeddings.pt", "_context_rqvae.pt"
+            )
+            encoded_context = encode_context_with_rqvae(
+                context_text_embedding, rqvae_model_path, config, device, cache_path=rqvae_cache_path
+            )
 
         training_stage = method_config.get("training_stage", "regular")
 

@@ -16,15 +16,15 @@ from sentence_transformers import SentenceTransformer
 from sklearn.preprocessing import StandardScaler
 from tqdm import trange
 
-def encode_context(config, date_context, context_embedding_save_path, device):
-    # Handle empty or None date_context (when context is disabled)
+def encode_context_text(config, date_context, context_embedding_save_path, device):
+    """Encode context text into sentence embeddings (768d). Used as input to RQ-VAE encoder."""
     if not date_context or len(date_context) == 0:
         return None
     
     if os.path.exists(context_embedding_save_path):
         context_embedding = torch.load(context_embedding_save_path, weights_only=False)
     else:
-        print("Context embedding not found, generating context embeddings...")
+        print("Context text embedding not found, generating...")
         content_model = config["dataset"]["content_model"]
         if "sentence-t5" in content_model:
             with torch.no_grad():
@@ -35,46 +35,65 @@ def encode_context(config, date_context, context_embedding_save_path, device):
             bs = 512 if content_model == "sentence-t5-base" else 4
             with torch.no_grad():
                 embeddings = text_embedding_model.encode(
-                    date_descp,
-                    convert_to_numpy=True,
-                    batch_size=bs,
-                    show_progress_bar=True,
+                    date_descp, convert_to_numpy=True, batch_size=bs, show_progress_bar=True,
                 )
-            with open(context_embedding_save_path, "wb") as f:
-                pickle.dump(embeddings, f)
         elif "bert" in content_model:
             from transformers import BertModel, BertTokenizer
-
             tokenizer = BertTokenizer.from_pretrained("bert-base-uncased")
             model = BertModel.from_pretrained("bert-base-uncased").to(device)
-            bs = 32
-            # embedding is generated based on the sorted text
             date_descp = [value for key, value in date_context.items()]
-            total_length = len(date_descp)
             embedding_list = []
-            for i in trange(total_length // bs + 1):
-                input_text = date_descp[i * bs : (i + 1) * bs]
+            for i in trange(len(date_descp) // 32 + 1):
+                input_text = date_descp[i * 32 : (i + 1) * 32]
                 with torch.no_grad():
-                    inputs = tokenizer(
-                        input_text,
-                        padding=True,
-                        truncation=True,
-                        max_length=512,
-                        return_tensors="pt",
-                    ).to(device)
-                    output = model(**inputs, return_dict=True)  # [bs, 1024]
-                    embeddings = output.last_hidden_state[:, 0]
-                    embedding_list.append(embeddings)
-
+                    inputs = tokenizer(input_text, padding=True, truncation=True, max_length=512, return_tensors="pt").to(device)
+                    output = model(**inputs, return_dict=True)
+                    embedding_list.append(output.last_hidden_state[:, 0])
             embeddings = torch.cat(embedding_list, dim=0).cpu().numpy()
-            with open(context_embedding_save_path, "wb") as f:
-                pickle.dump(embeddings, f)
         else:
             raise NotImplementedError
         embeddings = StandardScaler().fit_transform(embeddings)
         context_embedding = torch.Tensor(embeddings).to(device)
         torch.save(context_embedding, context_embedding_save_path)
     return context_embedding
+
+
+def encode_context_with_rqvae(context_text_embedding, rqvae_model_path, config, device, cache_path=None):
+    """Pass context through trained RQ-VAE encoder to get aligned latent representations."""
+    if context_text_embedding is None:
+        return None
+
+    # Check cache
+    if cache_path and os.path.exists(cache_path):
+        print(f"Loading cached RQ-VAE context encoding from {cache_path}")
+        return torch.load(cache_path, weights_only=False)
+
+    from .rqvae.rqvae import RQVAE
+
+    # Reconstruct RQ-VAE model from config
+    model_config = config["dataset"]["RQ-VAE"]
+    rqvae = RQVAE(
+        model_config["input_dim"],
+        model_config["hidden_dim"],
+        model_config["latent_dim"],
+        model_config["num_layers"],
+        model_config["code_book_size"],
+        model_config["dropout"],
+        latent_loss_weight=model_config["beta"],
+    )
+    rqvae.load_state_dict(torch.load(rqvae_model_path, map_location=device, weights_only=False))
+    rqvae.to(device)
+    rqvae.eval()
+
+    with torch.no_grad():
+        encoded = rqvae.encode(context_text_embedding.to(device))  # [N, latent_dim]
+
+    print(f"Context encoded via RQ-VAE encoder: {context_text_embedding.shape} → {encoded.shape}")
+
+    if cache_path:
+        torch.save(encoded, cache_path)
+
+    return encoded
 
 def process_embeddings(
     config,

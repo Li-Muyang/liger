@@ -204,3 +204,8 @@ def train(config, device, item_embedding, id_split, id_save_location):
 
         with open(f"{id_save_location}", "wb") as f:
             pickle.dump(ids, f)
+
+        # Save RQ-VAE model for later use (e.g., encoding context)
+        rqvae_model_path = f"{id_save_location}_model.pt"
+        torch.save(rqvae.state_dict(), rqvae_model_path)
+        print(f"RQ-VAE model saved to {rqvae_model_path}")

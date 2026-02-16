@@ -102,25 +102,9 @@ class TIGER(T5ForConditionalGeneration):
                 config.d_model, eps=config.layer_norm_epsilon
             )
 
-        if "text_embedding_dim" in embedding_head_dict:
-            if embedding_head_dict["embed_proj_type"] == "mlp":
-                self.context_proj = MLP(
-                    embedding_head_dict["text_embedding_dim"],
-                    embedding_head_dict["hidden_sizes"][::-1],
-                    config.d_model,
-                    dropout=embedding_head_dict["embd_proj_in_dropout_rate"],
-                    layer_norm_eps=config.layer_norm_epsilon,
-                )
-            elif embedding_head_dict["embed_proj_type"] == "linear":
-                self.context_proj = nn.Linear(
-                    embedding_head_dict["text_embedding_dim"], config.d_model
-                )
-            else:
-                raise ValueError(
-                    f"Invalid embedding projection type: {embedding_head_dict['embed_proj_type']}"
-                )
-        else:
-            self.context_proj = None
+        # context_proj is created dynamically in training.py based on actual
+        # encoded_context dimensions (which depend on encoding method, e.g., RQ-VAE encoder)
+        self.context_proj = None
 
         self.n_semantic_codebook = n_semantic_codebook
         self.semantic_pos = nn.Embedding(n_semantic_codebook + 1, config.d_model)
