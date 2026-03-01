@@ -14,6 +14,75 @@ from tqdm import tqdm
 from transformers import LogitsProcessor, LogitsProcessorList
 
 
+def _get_context_embeds(model, batch, device, method_config):
+    """
+    Get context embeddings to prepend to encoder input.
+    
+    Supports two modes:
+    1. RQ-VAE tokenized (new): context_codes stored on model → look up in model.shared
+       Returns: [batch, n_codebook, d_model] (multiple tokens)
+    2. Continuous (old): context_embedding + context_proj → single projected token
+       Returns: [batch, 1, d_model]
+    
+    Returns None if no context is available for this batch.
+    """
+    if method_config.get("date_vocab_size", 0) <= 0:
+        return None
+    if "label_date_ids" not in batch:
+        return None
+    
+    label_date_ids = batch["label_date_ids"].to(device)
+    if torch.any(label_date_ids <= 0):
+        raise ValueError("label_date_ids must be positive.")
+    
+    use_tokenized = method_config.get("context_tokenization") == "rqvae"
+    
+    if use_tokenized and hasattr(model, "context_codes") and model.context_codes is not None:
+        # NEW: RQ-VAE tokenized context → multiple tokens from shared embedding
+        context_codes = model.context_codes  # [N_dates, n_codebook]
+        if context_codes.device != device:
+            context_codes = context_codes.to(device)
+        # Look up codes for this batch's dates
+        date_codes = context_codes[label_date_ids - 1]  # [batch, n_codebook]
+        # Embed via shared T5 embedding table (same as items)
+        context_embeds = model.shared(date_codes)  # [batch, n_codebook, d_model]
+        return context_embeds
+    
+    elif hasattr(model, "context_embedding") and model.context_embedding is not None:
+        # OLD: Continuous context → single projected token
+        context_embedding = model.context_embedding
+        if context_embedding.device != device:
+            context_embedding = context_embedding.to(device)
+        if context_embedding.shape[0] < method_config["date_vocab_size"]:
+            raise ValueError("context_embedding size is smaller than date vocab size.")
+        
+        date_desc = context_embedding[label_date_ids - 1]
+        context_proj = getattr(model, "context_proj", None)
+        if context_proj is not None:
+            return context_proj(date_desc)[:, None, :]  # [batch, 1, d_model]
+        elif hasattr(model, "emb_proj"):
+            return model.emb_proj(date_desc)[:, None, :]
+        else:
+            raise AttributeError("Model has no context projection layer.")
+    
+    return None
+
+
+def _prepend_context(context_embeds, inputs_embeds, attention_mask):
+    """Prepend context embeddings and extend attention mask."""
+    if context_embeds is None:
+        return inputs_embeds, attention_mask
+    n_ctx = context_embeds.shape[1]  # number of context tokens
+    inputs_embeds = torch.cat([context_embeds, inputs_embeds], dim=1)
+    ones = torch.ones(
+        attention_mask.shape[0], n_ctx,
+        device=attention_mask.device,
+        dtype=attention_mask.dtype,
+    )
+    attention_mask = torch.cat([ones, attention_mask], dim=1)
+    return inputs_embeds, attention_mask
+
+
 def model_forward(model, batch, device, n_codebook, method_config, skip_forward=False):
     if method_config["use_id"] == "sid":
         input_sids = batch["input_sids"].to(device)
@@ -25,31 +94,8 @@ def model_forward(model, batch, device, n_codebook, method_config, skip_forward=
 
         item_idx_start = 1 if method_config["include_user_id"] else 0
         
-        # Prepare context token if available (will prepend before encoder)
-        projected_context = None
-        if (
-            method_config.get("date_vocab_size", 0) > 0
-            and hasattr(model, "context_embedding")
-            and "label_date_ids" in batch
-        ):
-            label_date_ids = batch["label_date_ids"].to(device)
-            if torch.any(label_date_ids <= 0):
-                raise ValueError("label_date_ids must be positive.")
-            context_embedding = model.context_embedding
-            if context_embedding.device != device:
-                context_embedding = context_embedding.to(device)
-            if context_embedding.shape[0] < method_config["date_vocab_size"]:
-                raise ValueError("context_embedding size is smaller than date vocab size.")
-            
-            # Project context token
-            date_desc = context_embedding[label_date_ids - 1]
-            context_proj = getattr(model, "context_proj", None)
-            if context_proj is not None:
-                projected_context = context_proj(date_desc)[:, None, :]  # [batch, 1, d_model]
-            elif hasattr(model, "emb_proj"):
-                projected_context = model.emb_proj(date_desc)[:, None, :]
-            else:
-                raise AttributeError("Model has no context projection layer.")
+        # Prepare context embeddings (works for both tokenized and continuous)
+        context_embeds = _get_context_embeds(model, batch, device, method_config)
         
         # Model forwarding
         with torch.amp.autocast(device_type="cuda", dtype=torch.float16):
@@ -92,15 +138,10 @@ def model_forward(model, batch, device, n_codebook, method_config, skip_forward=
                 inputs_embeds = model.input_embed_layernorm(inputs_embeds)
                 inputs_embeds = model.input_embed_dropout(inputs_embeds)
                 
-                # Prepend context before encoder
-                if projected_context is not None:
-                    inputs_embeds = torch.cat([projected_context, inputs_embeds], dim=1)
-                    ones = torch.ones(
-                        attention_mask_sids.shape[0], 1,
-                        device=attention_mask_sids.device,
-                        dtype=attention_mask_sids.dtype
-                    )
-                    attention_mask_sids = torch.cat([ones, attention_mask_sids], dim=1)
+                # Prepend context before encoder (supports multi-token)
+                inputs_embeds, attention_mask_sids = _prepend_context(
+                    context_embeds, inputs_embeds, attention_mask_sids
+                )
 
                 if skip_forward:
                     outputs = None
@@ -119,15 +160,10 @@ def model_forward(model, batch, device, n_codebook, method_config, skip_forward=
                 # Convert input_ids to embeddings first
                 inputs_embeds = model.shared(input_sids)
                 
-                # Prepend context before encoder
-                if projected_context is not None:
-                    inputs_embeds = torch.cat([projected_context, inputs_embeds], dim=1)
-                    ones = torch.ones(
-                        attention_mask_sids.shape[0], 1,
-                        device=attention_mask_sids.device,
-                        dtype=attention_mask_sids.dtype
-                    )
-                    attention_mask_sids = torch.cat([ones, attention_mask_sids], dim=1)
+                # Prepend context before encoder (supports multi-token)
+                inputs_embeds, attention_mask_sids = _prepend_context(
+                    context_embeds, inputs_embeds, attention_mask_sids
+                )
                 
                 if skip_forward:
                     outputs = None
@@ -152,31 +188,8 @@ def model_forward(model, batch, device, n_codebook, method_config, skip_forward=
 
         item_idx_start = 1 if method_config["include_user_id"] else 0
         
-        # Prepare context token if available (will prepend before encoder)
-        projected_context = None
-        if (
-            method_config.get("date_vocab_size", 0) > 0
-            and hasattr(model, "context_embedding")
-            and "label_date_ids" in batch
-        ):
-            label_date_ids = batch["label_date_ids"].to(device)
-            if torch.any(label_date_ids <= 0):
-                raise ValueError("label_date_ids must be positive.")
-            context_embedding = model.context_embedding
-            if context_embedding.device != device:
-                context_embedding = context_embedding.to(device)
-            if context_embedding.shape[0] < method_config["date_vocab_size"]:
-                raise ValueError("context_embedding size is smaller than date vocab size.")
-            
-            # Project context token
-            date_desc = context_embedding[label_date_ids - 1]
-            context_proj = getattr(model, "context_proj", None)
-            if context_proj is not None:
-                projected_context = context_proj(date_desc)[:, None, :]  # [batch, 1, d_model]
-            elif hasattr(model, "emb_proj"):
-                projected_context = model.emb_proj(date_desc)[:, None, :]
-            else:
-                raise AttributeError("Model has no context projection layer.")
+        # Prepare context embeddings (works for both tokenized and continuous)
+        context_embeds = _get_context_embeds(model, batch, device, method_config)
         
         # Model forwarding
         with torch.amp.autocast(device_type="cuda", dtype=torch.float16):
@@ -206,15 +219,10 @@ def model_forward(model, batch, device, n_codebook, method_config, skip_forward=
                 inputs_embeds = model.input_embed_layernorm(inputs_embeds)
                 inputs_embeds = model.input_embed_dropout(inputs_embeds)
                 
-                # Prepend context before encoder
-                if projected_context is not None:
-                    inputs_embeds = torch.cat([projected_context, inputs_embeds], dim=1)
-                    ones = torch.ones(
-                        attention_mask_ids.shape[0], 1,
-                        device=attention_mask_ids.device,
-                        dtype=attention_mask_ids.dtype
-                    )
-                    attention_mask_ids = torch.cat([ones, attention_mask_ids], dim=1)
+                # Prepend context before encoder (supports multi-token)
+                inputs_embeds, attention_mask_ids = _prepend_context(
+                    context_embeds, inputs_embeds, attention_mask_ids
+                )
 
                 if skip_forward:
                     outputs = None
@@ -233,15 +241,10 @@ def model_forward(model, batch, device, n_codebook, method_config, skip_forward=
                 # Convert input_ids to embeddings first
                 inputs_embeds = model.shared(input_ids)
                 
-                # Prepend context before encoder
-                if projected_context is not None:
-                    inputs_embeds = torch.cat([projected_context, inputs_embeds], dim=1)
-                    ones = torch.ones(
-                        attention_mask_ids.shape[0], 1,
-                        device=attention_mask_ids.device,
-                        dtype=attention_mask_ids.dtype
-                    )
-                    attention_mask_ids = torch.cat([ones, attention_mask_ids], dim=1)
+                # Prepend context before encoder (supports multi-token)
+                inputs_embeds, attention_mask_ids = _prepend_context(
+                    context_embeds, inputs_embeds, attention_mask_ids
+                )
                 
                 if skip_forward:
                     outputs = None

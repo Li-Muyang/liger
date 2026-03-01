@@ -576,6 +576,7 @@ def train_tiger(
     id_save_location,
     device,
     encoded_context=None,
+    context_codes=None,
     user_timestamps=None,
     user_ids=None,
     date2id=None,
@@ -746,12 +747,25 @@ def train_tiger(
         flag_use_learnable_text_embed=method_config["flag_add_input_embedding"],
         embedding_head_dict=method_config["embedding_head_dict"],
     ).to(device)
-    if encoded_context is not None:
+
+    # Attach context to model (supports both old continuous and new tokenized)
+    if context_codes is not None:
+        # NEW: RQ-VAE tokenized context — discrete codes looked up via model.shared
+        model.context_codes = context_codes.to(device)
+        model.context_embedding = None
+        model.context_proj = None
+        n_ctx_tokens = context_codes.shape[1]
+        print(f"[Context] Using RQ-VAE tokenized context: {context_codes.shape} ({n_ctx_tokens} tokens per date)")
+    elif encoded_context is not None:
+        # OLD: Continuous context — needs context_proj
+        model.context_codes = None
         model.context_embedding = encoded_context.to(device)
         if model.context_proj is None:
             model.context_proj = torch.nn.Linear(
                 encoded_context.shape[-1], model_config.d_model
             ).to(device)
+    else:
+        model.context_codes = None
 
     # Stage 2: Load backbone + pre-trained context_proj
     training_stage = method_config.get("training_stage", "regular")
@@ -981,12 +995,21 @@ def train_tiger(
         flag_use_learnable_text_embed=method_config["flag_add_input_embedding"],
         embedding_head_dict=method_config["embedding_head_dict"],
     ).to(device)
-    if encoded_context is not None:
+
+    # Re-attach context to test model (same logic as training model)
+    if context_codes is not None:
+        model.context_codes = context_codes.to(device)
+        model.context_embedding = None
+        model.context_proj = None
+    elif encoded_context is not None:
+        model.context_codes = None
         model.context_embedding = encoded_context.to(device)
         if model.context_proj is None:
             model.context_proj = torch.nn.Linear(
                 encoded_context.shape[-1], model_config.d_model
             ).to(device)
+    else:
+        model.context_codes = None
 
     model.load_state_dict(torch.load(best_state_path), strict=True)
 

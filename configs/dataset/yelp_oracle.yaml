@@ -1,0 +1,75 @@
+# Yelp Oracle dataset configuration
+# Uses real timestamps + oracle date-category context from statistical analysis
+# Context is tokenized via RQ-VAE (same codebook as items) → multi-token prepend
+
+# data preprocessing
+type: Yelp_oracle
+name: Yelp
+raw_data_path: ./ID_generation/preprocessing/raw_data/
+processed_data_path: ./ID_generation/preprocessing/processed/
+context_embedding_save_path: ./ID_generation/preprocessing/processed/
+
+# Oracle context: generated from date-category lift analysis
+# Will be auto-generated if not present
+date_context_file: ./ID_generation/preprocessing/raw_data/Yelp/Yelp_oracle_date_context.jsonl
+
+# Use RQ-VAE tokenization for context (multi-token, shared codebook with items)
+context_tokenization: rqvae
+
+# Sequence configuration
+max_items_per_seq: 50
+
+# Features to extract from Yelp.item.json
+features_needed: ['title', 'description']
+
+# Content model for embedding generation
+content_model: sentence-t5-base
+
+# Prompt format for text generation
+prompt_format: "yelp"
+
+# RQ-VAE configuration for semantic ID generation
+RQ-VAE:
+  optimizer: AdamW
+  weight_decay: 0.1
+  batch_size: 2048
+  epochs: 8000
+  lr: 0.001
+  beta: 0.25
+  input_dim: 768  # sentence-t5-base embedding dimension
+  hidden_dim:
+    - 768
+    - 512
+    - 256
+  latent_dim: 128
+  num_layers: 3
+  dropout: 0.1
+  code_book_size: 256
+  max_seq_len: 256
+  val_ratio: 0.05
+
+# TIGER model configuration
+TIGER:
+  n_positions: 106  # slightly larger to accommodate context tokens prepended
+  save_every_n_epochs: 10
+  T5:
+    encoder_layers: 6
+    decoder_layers: 6
+    d_model: 128
+    d_ff: 1024
+    num_heads: 6
+    d_kv: 64
+    dropout_rate: 0.2
+    feed_forward_proj: "relu"
+    initializer_factor: 0.02
+
+  trainer:
+    steps: 200000
+    lr: 0.0003
+    patience: 50
+    scheduler: "cosine"
+    warmup_steps: 10000
+    weight_decay: 0.035
+    batch_size: 256
+    eval_batch_size: 32
+    eval_frequence: 10

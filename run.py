@@ -14,7 +14,7 @@ import hydra
 import torch
 from ID_generation.preprocessing.data_process import preprocessing
 from ID_generation.train_rqvae import train as train_sid
-from ID_generation.utils import process_data_split, process_embeddings, encode_context_text, encode_context_with_rqvae
+from ID_generation.utils import process_data_split, process_embeddings, encode_context_text, encode_context_with_rqvae, tokenize_context_with_rqvae
 from omegaconf import DictConfig
 from src.training import train_tiger, pretrain_context_projector
 from src.load_data import load_date_context
@@ -76,6 +76,7 @@ def main(config: DictConfig) -> None:
     config = PATH_CONFIG.set_config(config)
     config["logging"]["project"] = "liger"
     is_steam = config["dataset"]["type"] == "steam"
+    context_tokenization = config["dataset"].get("context_tokenization", None)
 
     try:
         data_file, id2meta_file, item2attribute_file, user_timestamps = preprocessing(config["dataset"])
@@ -138,21 +139,40 @@ def main(config: DictConfig) -> None:
             config, device, item_embedding, id_split, PATH_CONFIG.id_save_location
         )
 
-        # Encode context through RQ-VAE encoder to align with item latent space
+        # Encode/tokenize context through RQ-VAE
         encoded_context = None
+        context_codes = None  # discrete tokenized codes (new approach)
         if context_text_embedding is not None:
             rqvae_model_path = f"{PATH_CONFIG.id_save_location}_model.pt"
-            rqvae_cache_path = PATH_CONFIG.context_embedding_save_path.replace(
-                "_context_embeddings.pt", "_context_rqvae.pt"
-            )
-            encoded_context = encode_context_with_rqvae(
-                context_text_embedding, rqvae_model_path, config, device, cache_path=rqvae_cache_path
-            )
+            
+            if context_tokenization == "rqvae":
+                # NEW: Tokenize context via RQ-VAE quantization → discrete codes in shared vocab
+                rqvae_token_cache = PATH_CONFIG.context_embedding_save_path.replace(
+                    "_context_embeddings.pt", "_context_rqvae_tokens.pt"
+                )
+                codebook_size = config["dataset"]["RQ-VAE"]["code_book_size"]
+                context_codes = tokenize_context_with_rqvae(
+                    context_text_embedding, rqvae_model_path, config, device,
+                    codebook_size=codebook_size, cache_path=rqvae_token_cache
+                )
+                print(f"Context tokenized: {context_codes.shape} (discrete codes in item vocab space)")
+            else:
+                # OLD: Encode context via RQ-VAE encoder → continuous latent → context_proj
+                rqvae_cache_path = PATH_CONFIG.context_embedding_save_path.replace(
+                    "_context_embeddings.pt", "_context_rqvae.pt"
+                )
+                encoded_context = encode_context_with_rqvae(
+                    context_text_embedding, rqvae_model_path, config, device, cache_path=rqvae_cache_path
+                )
 
         training_stage = method_config.get("training_stage", "regular")
+        method_config["context_tokenization"] = context_tokenization
 
         if training_stage == "pretrain_context":
-            # Stage 1: Pre-train context projector only
+            # Stage 1: Pre-train context projector only (only for old continuous approach)
+            assert context_tokenization != "rqvae", (
+                "pretrain_context stage is not needed for RQ-VAE tokenized context"
+            )
             pretrain_context_projector(
                 config,
                 train_config,
@@ -179,6 +199,7 @@ def main(config: DictConfig) -> None:
                 PATH_CONFIG.id_save_location,
                 device=device,
                 encoded_context=encoded_context,
+                context_codes=context_codes,
                 user_timestamps=user_timestamps,
                 user_ids=user_ids,
                 date2id=date2id,

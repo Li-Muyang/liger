@@ -125,6 +125,158 @@ class Yelp:
         return datas
 
 
+class Yelp_oracle(Yelp):
+    """
+    Yelp dataset with oracle date-category context.
+    Extends Yelp to:
+    1. Load real unix timestamps (from Yelp.inter_timestamps.json)
+    2. Auto-generate oracle date-category context JSONL from item metadata
+    """
+
+    def __init__(self, root):
+        super().__init__(root)
+
+    def process(self):
+        """
+        Load Yelp.inter.json with REAL timestamps from Yelp.inter_timestamps.json.
+        Falls back to sequential if timestamps file not found.
+        """
+        inter_file = os.path.join(self.data_path, "Yelp.inter.json")
+        timestamps_file = os.path.join(self.data_path, "Yelp.inter_timestamps.json")
+
+        if not os.path.exists(inter_file):
+            raise FileNotFoundError(
+                f"Yelp interaction file not found: {inter_file}\n"
+                f"Please run preprocess_yelp.py to generate Yelp data files."
+            )
+
+        print(f"Loading Yelp_oracle interactions from {inter_file}")
+        with open(inter_file, 'r') as f:
+            interactions = json.load(f)
+
+        all_timestamps = None
+        if os.path.exists(timestamps_file):
+            print(f"Loading real timestamps from {timestamps_file}")
+            with open(timestamps_file, 'r') as f:
+                all_timestamps = json.load(f)
+        else:
+            print(f"WARNING: {timestamps_file} not found, using sequential timestamps.")
+
+        datas = []
+        for user_id, items in interactions.items():
+            for idx, item_id in enumerate(items):
+                if all_timestamps is not None and user_id in all_timestamps:
+                    timestamp = int(all_timestamps[user_id][idx])
+                else:
+                    timestamp = idx + 1
+                datas.append((str(user_id), str(item_id), timestamp))
+
+        ts_type = 'real timestamps' if all_timestamps is not None else 'sequential timestamps'
+        print(f"Loaded {len(datas)} interactions from {len(interactions)} users ({ts_type})")
+        return datas
+
+    def generate_oracle_context(self, data_maps, output_path):
+        """
+        Generate oracle date-category context JSONL from item metadata.
+        For each unique date in the dataset, compute top-5 categories by lift
+        (observed share / baseline share) and format as context text.
+
+        Output format (compatible with load_date_context()):
+        {"recordId": "2019-01-01", "modelOutput": {"content": [{"text": "today is 2019-01-01, likely categories: Cat1, Cat2, ..."}]}}
+        """
+        # Load item metadata for categories
+        item_file = os.path.join(self.data_path, "Yelp.item.json")
+        if not os.path.exists(item_file):
+            raise FileNotFoundError(f"Yelp item file not found: {item_file}")
+
+        with open(item_file, 'r') as f:
+            items_raw = json.load(f)
+
+        # Build item_id -> categories mapping (using raw item IDs before id_map)
+        item_categories = {}
+        for item_id_str, meta in items_raw.items():
+            cats = [c.strip() for c in meta.get("description", "").split(",") if c.strip()]
+            # Filter out yelp/event categories
+            cats = [c for c in cats if not any(kw in c.lower() for kw in ["yelp", "event", "elite"])]
+            item_categories[item_id_str] = cats
+
+        # Load interactions + timestamps to compute per-date category counts
+        inter_file = os.path.join(self.data_path, "Yelp.inter.json")
+        timestamps_file = os.path.join(self.data_path, "Yelp.inter_timestamps.json")
+
+        with open(inter_file, 'r') as f:
+            interactions = json.load(f)
+
+        all_timestamps = None
+        if os.path.exists(timestamps_file):
+            with open(timestamps_file, 'r') as f:
+                all_timestamps = json.load(f)
+
+        # Count categories per date and overall baseline
+        date_cat_counts = defaultdict(lambda: defaultdict(int))
+        date_totals = defaultdict(int)
+        cat_overall = defaultdict(int)
+        overall_total = 0
+
+        for user_id, items in interactions.items():
+            for idx, item_id in enumerate(items):
+                item_id_str = str(item_id)
+                cats = item_categories.get(item_id_str, [])
+                if not cats:
+                    continue
+
+                if all_timestamps is not None and user_id in all_timestamps:
+                    ts = int(all_timestamps[user_id][idx])
+                    date_key = datetime.utcfromtimestamp(ts).strftime("%Y-%m-%d")
+                else:
+                    date_key = f"seq-{idx}"  # fallback
+
+                for cat in cats:
+                    date_cat_counts[date_key][cat] += 1
+                    cat_overall[cat] += 1
+                date_totals[date_key] += 1
+                overall_total += 1
+
+        # Compute baseline share
+        cat_baseline = {cat: cnt / overall_total for cat, cnt in cat_overall.items()}
+
+        # For each date, rank categories by lift, take top 5
+        MIN_COUNT = 3
+        TOP_K = 5
+
+        lines = []
+        for date_key in sorted(date_cat_counts.keys()):
+            dtotal = date_totals[date_key]
+            if dtotal == 0:
+                continue
+            cat_lifts = []
+            for cat, count in date_cat_counts[date_key].items():
+                if count < MIN_COUNT:
+                    continue
+                share = count / dtotal
+                base = cat_baseline.get(cat, 0)
+                if base > 0:
+                    lift = share / base
+                    cat_lifts.append((cat, lift))
+            cat_lifts.sort(key=lambda x: x[1], reverse=True)
+            top_cats = [cat for cat, _ in cat_lifts[:TOP_K]]
+
+            if top_cats:
+                text = f"today is {date_key}, likely categories: {', '.join(top_cats)}"
+                record = {
+                    "recordId": date_key,
+                    "modelOutput": {"content": [{"text": text}]}
+                }
+                lines.append(json.dumps(record))
+
+        os.makedirs(os.path.dirname(output_path), exist_ok=True)
+        with open(output_path, 'w') as f:
+            f.write('\n'.join(lines) + '\n')
+
+        print(f"Generated oracle context for {len(lines)} dates → {output_path}")
+        return output_path
+
+
 class Amazon:
     def __init__(self, root, dataset_name, rating_score):
         self.root = os.path.abspath(root)
@@ -787,6 +939,14 @@ def preprocessing_each_dataset(config, dataset_name):
     elif data_type == "Yelp":
         dataset = Yelp(raw_data_path)
         datas = dataset.process()
+    elif data_type == "Yelp_oracle":
+        dataset = Yelp_oracle(raw_data_path)
+        datas = dataset.process()
+        # Auto-generate oracle context JSONL if not present
+        oracle_context_path = os.path.join(raw_data_path, "Yelp", "Yelp_oracle_date_context.jsonl")
+        if not os.path.exists(oracle_context_path):
+            print("Oracle context not found, generating...")
+            dataset.generate_oracle_context(None, oracle_context_path)
     else:
         raise NotImplementedError
 
@@ -860,7 +1020,7 @@ def preprocessing_each_dataset(config, dataset_name):
             attribute_core,
             prompt_format,
         )
-    elif data_type == "Yelp":
+    elif data_type in ("Yelp", "Yelp_oracle"):
         meta_infos = dataset.process_meta(data_maps)
         # Yelp doesn't have brand/genre attributes like Amazon/Steam
         # Skip attribute extraction, just create id2meta mapping
