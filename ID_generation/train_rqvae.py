@@ -164,48 +164,53 @@ def train_rqvae(model, x, device, writer, config):
     print("Training complete.")
 
 
-def train(config, device, item_embedding, id_split, id_save_location):
+def train(config, device, item_embedding, id_split, id_save_location,
+          context_embedding=None, context_codes_save_path=None):
 
-    if os.path.exists(id_save_location):
+    # Check if we need context codes but don't have them
+    need_context = (context_embedding is not None and context_codes_save_path
+                    and not os.path.exists(context_codes_save_path))
+
+    if os.path.exists(id_save_location) and not need_context:
         return
-    else:
-        print("Semantic ID file not found, Training RQ-VAE model...")
-        from utils import setup_logging
 
-        writer = setup_logging(config)
-        model_config = config["dataset"]["RQ-VAE"]
+    # If item pkl exists but context codes missing, delete pkl to force retrain
+    if os.path.exists(id_save_location) and need_context:
+        print("Context codes missing — deleting item codes to retrain RQ-VAE...")
+        os.remove(id_save_location)
 
-        input_size = model_config["input_dim"]
-        hidden_sizes = model_config["hidden_dim"]
-        latent_size = model_config["latent_dim"]
-        num_levels = model_config["num_layers"]
-        codebook_size = model_config["code_book_size"]
-        dropout = model_config["dropout"]
+    print("Training RQ-VAE model...")
+    from utils import setup_logging
 
-        rqvae = RQVAE(
-            input_size,
-            hidden_sizes,
-            latent_size,
-            num_levels,
-            codebook_size,
-            dropout,
-            latent_loss_weight=model_config["beta"],
-        )
+    writer = setup_logging(config)
+    model_config = config["dataset"]["RQ-VAE"]
 
-        train_rqvae(
-            rqvae, item_embedding[id_split["seen"] - 1], device, writer, model_config
-        )
-        # id_split['seen'] - 1 == train_inds, train_inds is the indices of the training items
-        writer.finish()
+    rqvae = RQVAE(
+        model_config["input_dim"], model_config["hidden_dim"],
+        model_config["latent_dim"], model_config["num_layers"],
+        model_config["code_book_size"], model_config["dropout"],
+        latent_loss_weight=model_config["beta"],
+    )
 
-        rqvae.to(device)
-        rqvae.eval()
-        ids = rqvae.get_codes(item_embedding).cpu().numpy()  # ids start from 0
+    train_rqvae(
+        rqvae, item_embedding[id_split["seen"] - 1], device, writer, model_config
+    )
+    writer.finish()
 
-        with open(f"{id_save_location}", "wb") as f:
-            pickle.dump(ids, f)
+    rqvae.to(device)
+    rqvae.eval()
 
-        # Save RQ-VAE model for later use (e.g., encoding context)
-        rqvae_model_path = f"{id_save_location}_model.pt"
-        torch.save(rqvae.state_dict(), rqvae_model_path)
-        print(f"RQ-VAE model saved to {rqvae_model_path}")
+    # Save item codes
+    with torch.no_grad():
+        ids = rqvae.get_codes(item_embedding).cpu().numpy()
+    with open(id_save_location, "wb") as f:
+        pickle.dump(ids, f)
+    print(f"Item codes saved to {id_save_location}")
+
+    # Save context codes if needed
+    if need_context:
+        with torch.no_grad():
+            codes = rqvae.get_codes(context_embedding.to(device)).cpu().numpy()
+        with open(context_codes_save_path, "wb") as f:
+            pickle.dump(codes, f)
+        print(f"Context codes saved to {context_codes_save_path} (shape: {codes.shape})")

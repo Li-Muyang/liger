@@ -299,273 +299,6 @@ def train_epoch(
     return model
 
 
-def pretrain_context_projector(
-    orig_config,
-    config,
-    method_config,
-    id_split,
-    user_sequence,
-    item_embedding,
-    id_save_location,
-    device,
-    encoded_context=None,
-    user_timestamps=None,
-    user_ids=None,
-    date2id=None,
-):
-    """
-    Stage 1: Pre-train only the context_proj module while freezing everything else.
-    Reuses the same data pipeline and loss as train_tiger().
-    Returns the path to the saved context_proj checkpoint.
-    """
-    assert encoded_context is not None, "encoded_context is required for context projector pre-training"
-
-    output_path = config["output_path"]
-    codebook_size = config["RQ-VAE"]["code_book_size"]
-    max_items_per_seq = config["max_items_per_seq"]
-
-    writer = setup_logging(orig_config)
-
-    pretrain_config = method_config["pretrain_context_proj_config"]
-    tiger_config = config["TIGER"]
-    unseen_val, unseen_test, seen = (
-        id_split["unseen_val"],
-        id_split["unseen_test"],
-        id_split["seen"],
-    )
-
-    date_vocab_size = len(date2id) if date2id else 0
-    method_config["date_vocab_size"] = date_vocab_size
-    effective_n_positions = tiger_config["n_positions"]
-
-    result = load_data(
-        id_save_location,
-        user_sequence,
-        user_ids,
-        unseen_val,
-        unseen_test,
-        seen,
-        item_embedding,
-        method_config,
-        max_length=effective_n_positions,
-        codebook_size=codebook_size,
-        max_items_per_seq=max_items_per_seq,
-        user_timestamps=user_timestamps,
-        date2id=date2id,
-    )
-
-    (
-        training_data,
-        val_data,
-        test_data,
-        unseen_val_data,
-        unseen_test_data,
-        seen_semantic_ids,
-        val_unseen_semantic_ids,
-        test_unseen_semantic_ids,
-        max_last_semantic_ids,
-        n_semantic_codebook,
-        n_codebook,
-        item2sid,
-    ) = result
-
-    all_semantic_ids = np.unique(
-        np.concatenate(
-            [seen_semantic_ids, val_unseen_semantic_ids, test_unseen_semantic_ids],
-            axis=0,
-        ),
-        axis=0,
-    )
-    unseen_semantic_ids = np.unique(
-        np.concatenate([val_unseen_semantic_ids, test_unseen_semantic_ids], axis=0),
-        axis=0,
-    )
-
-    if method_config["flag_use_output_embedding"]:
-        item_embedding = item_embedding.to(device)
-
-    train_dataset = CustomDataset(training_data)
-    val_dataset = CustomDataset(val_data)
-    unseen_val_dataset = CustomDataset(unseen_val_data)
-
-    seen_semantic_ids = torch.from_numpy(seen_semantic_ids)
-    val_unseen_semantic_ids = torch.from_numpy(val_unseen_semantic_ids)
-    test_unseen_semantic_ids = torch.from_numpy(test_unseen_semantic_ids)
-    all_semantic_ids = torch.from_numpy(all_semantic_ids)
-    unseen_semantic_ids = torch.from_numpy(unseen_semantic_ids)
-
-    # Build model (same as train_tiger)
-    last_codebook_size = max(max_last_semantic_ids, codebook_size)
-    if method_config["include_user_id"]:
-        this_vocab_size = 2000 + codebook_size * n_semantic_codebook + last_codebook_size + 2
-    else:
-        this_vocab_size = codebook_size * n_semantic_codebook + last_codebook_size + 2
-    if method_config["use_id"] == "item_id":
-        this_vocab_size = item_embedding.shape[0] + 2
-
-    method_config["date_token_offset"] = None
-
-    t5_config = tiger_config["T5"]
-    model_config = T5Config(
-        num_layers=t5_config["encoder_layers"],
-        num_decoder_layers=t5_config["decoder_layers"],
-        d_model=t5_config["d_model"],
-        d_ff=t5_config["d_ff"],
-        num_heads=t5_config["num_heads"],
-        d_kv=t5_config["d_kv"],
-        dropout_rate=t5_config["dropout_rate"],
-        vocab_size=this_vocab_size,
-        pad_token_id=0,
-        eos_token_id=int(this_vocab_size - 1),
-        decoder_start_token_id=0,
-        feed_forward_proj=t5_config["feed_forward_proj"],
-        n_positions=effective_n_positions,
-        layer_norm_epsilon=1e-8,
-        initializer_factor=t5_config["initializer_factor"],
-    )
-
-    model = TIGER(
-        config=model_config,
-        n_semantic_codebook=n_semantic_codebook,
-        max_items_per_seq=max_items_per_seq,
-        flag_use_output_embedding=method_config["flag_use_output_embedding"],
-        flag_use_learnable_text_embed=method_config["flag_add_input_embedding"],
-        embedding_head_dict=method_config["embedding_head_dict"],
-    ).to(device)
-
-    # Load backbone checkpoint
-    backbone_path = pretrain_config["backbone_checkpoint"]
-    assert backbone_path is not None, "backbone_checkpoint is required for Stage 1 pre-training"
-    backbone_state = torch.load(backbone_path, map_location=device, weights_only=False)
-    # Support both raw state_dict and training_state format
-    if "model_state_dict" in backbone_state:
-        backbone_state = backbone_state["model_state_dict"]
-    model.load_state_dict(backbone_state, strict=False)
-    print(f"Loaded backbone from {backbone_path}")
-
-    # Attach context embedding and projector
-    model.context_embedding = encoded_context.to(device)
-    if model.context_proj is None:
-        model.context_proj = torch.nn.Linear(
-            encoded_context.shape[-1], model_config.d_model
-        ).to(device)
-
-    # Freeze everything except context_proj
-    for name, param in model.named_parameters():
-        if "context_proj" not in name:
-            param.requires_grad = False
-    trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    total = sum(p.numel() for p in model.parameters())
-    print(f"[Stage 1] Trainable: {trainable} / {total} parameters")
-
-    # Dataloaders
-    batch_size = pretrain_config["batch_size"]
-    eval_batch_size = tiger_config["trainer"]["eval_batch_size"]
-    train_dataloader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
-    val_dataloader = DataLoader(val_dataset, batch_size=eval_batch_size, shuffle=False)
-    val_dataloader_embedding = DataLoader(val_dataset, batch_size=eval_batch_size, shuffle=False)
-    unseen_val_dataloader = DataLoader(unseen_val_dataset, batch_size=eval_batch_size, shuffle=False)
-    unseen_val_dataloader_embedding = DataLoader(unseen_val_dataset, batch_size=eval_batch_size, shuffle=False)
-
-    val_dataloader_dict = {
-        "in_set": val_dataloader,
-        "in_set_embd": val_dataloader_embedding,
-        "cold_start": unseen_val_dataloader,
-        "cold_start_embd": unseen_val_dataloader_embedding,
-    }
-
-    total_steps = pretrain_config["steps"]
-    total_epochs = int(np.ceil(total_steps / len(train_dataloader)))
-    print(f"[Stage 1] Total epochs: {total_epochs}")
-
-    if (
-        method_config["embedding_loss_weight"] > 0
-        and method_config["sid_loss_weight"] > 0
-    ):
-        RETRIEVE_KEY = [20, 40, 60, 80, 100]
-    else:
-        RETRIEVE_KEY = [10]
-
-    optimizer = AdamW(
-        [p for p in model.parameters() if p.requires_grad],
-        lr=pretrain_config["lr"],
-        weight_decay=pretrain_config["weight_decay"],
-    )
-
-    if hasattr(torch.amp, "GradScaler"):
-        scaler = torch.amp.GradScaler("cuda")
-    elif hasattr(torch.cuda, "amp"):
-        scaler = torch.cuda.amp.GradScaler()
-    else:
-        scaler = None
-
-    scheduler = None
-    if pretrain_config["scheduler"] != "none":
-        scheduler = get_scheduler(
-            name=pretrain_config["scheduler"],
-            optimizer=optimizer,
-            num_warmup_steps=pretrain_config["warmup_steps"],
-            num_training_steps=total_steps,
-        )
-
-    best_ndcg_10 = -0.01
-    best_epoch = 0
-    global_step = 0
-    pretrain_save_path = os.path.join(output_path, "pretrain_context_proj.pt")
-
-    for epoch in range(total_epochs):
-        model = train_epoch(
-            epoch,
-            train_dataloader,
-            model,
-            optimizer,
-            device,
-            scaler,
-            scheduler,
-            writer,
-            seen,
-            n_semantic_codebook,
-            n_codebook,
-            method_config,
-            item2sid,
-            item_embedding,
-            total_epochs=total_epochs,
-        )
-        global_step += len(train_dataloader)
-
-        if (epoch + 1) % pretrain_config["eval_frequence"] == 0:
-            logs, ndcg_at_10 = evaluate_helper(
-                model,
-                device,
-                val_dataloader_dict,
-                unseen_semantic_ids,
-                all_semantic_ids,
-                item2sid,
-                item_embedding,
-                method_config,
-                keyword="pretrain_val",
-                RETRIEVE_KEY=RETRIEVE_KEY,
-            )
-            logs["pretrain/step"] = global_step
-            writer.log(logs)
-
-            if ndcg_at_10 > best_ndcg_10:
-                best_ndcg_10 = ndcg_at_10
-                best_epoch = epoch
-                torch.save(model.context_proj.state_dict(), pretrain_save_path)
-                print(f"[Stage 1] Saved best context_proj at epoch {epoch + 1}")
-
-        if (
-            best_epoch + pretrain_config["patience"] < epoch
-        ) and global_step > pretrain_config["warmup_steps"]:
-            print("[Stage 1] Early stopping.")
-            break
-
-    writer.finish()
-    print(f"[Stage 1] Done. Best context_proj saved to {pretrain_save_path}")
-    return pretrain_save_path
-
-
 def train_tiger(
     orig_config,
     config,
@@ -575,7 +308,6 @@ def train_tiger(
     item_embedding,
     id_save_location,
     device,
-    encoded_context=None,
     context_codes=None,
     user_timestamps=None,
     user_ids=None,
@@ -748,48 +480,18 @@ def train_tiger(
         embedding_head_dict=method_config["embedding_head_dict"],
     ).to(device)
 
-    # Attach context to model (supports both old continuous and new tokenized)
+    # Attach RQ-VAE tokenized context to model
     if context_codes is not None:
-        # NEW: RQ-VAE tokenized context — discrete codes looked up via model.shared
         model.context_codes = context_codes.to(device)
-        model.context_embedding = None
-        model.context_proj = None
         n_ctx_tokens = context_codes.shape[1]
         print(f"[Context] Using RQ-VAE tokenized context: {context_codes.shape} ({n_ctx_tokens} tokens per date)")
-    elif encoded_context is not None:
-        # OLD: Continuous context — needs context_proj
-        model.context_codes = None
-        model.context_embedding = encoded_context.to(device)
-        if model.context_proj is None:
-            model.context_proj = torch.nn.Linear(
-                encoded_context.shape[-1], model_config.d_model
-            ).to(device)
     else:
         model.context_codes = None
-
-    # Stage 2: Load backbone + pre-trained context_proj
-    training_stage = method_config.get("training_stage", "regular")
-    if training_stage == "finetune_with_context":
-        # Load backbone first
-        backbone_path = method_config.get("pretrain_context_proj_config", {}).get("backbone_checkpoint", None)
-        if backbone_path and os.path.exists(backbone_path):
-            backbone_state = torch.load(backbone_path, map_location=device, weights_only=False)
-            if "model_state_dict" in backbone_state:
-                backbone_state = backbone_state["model_state_dict"]
-            model.load_state_dict(backbone_state, strict=False)
-            print(f"[Stage 2] Loaded backbone from {backbone_path}")
-        else:
-            print(f"[Stage 2] WARNING: backbone_checkpoint not found, using random init")
-
-        # Then load pre-trained context_proj
-        pretrain_proj_path = method_config.get("pretrain_context_proj_path", None)
-        if pretrain_proj_path and os.path.exists(pretrain_proj_path):
-            model.context_proj.load_state_dict(
-                torch.load(pretrain_proj_path, map_location=device, weights_only=False)
-            )
-            print(f"[Stage 2] Loaded pre-trained context_proj from {pretrain_proj_path}")
-        else:
-            print(f"[Stage 2] WARNING: pre-trained context_proj not found at {pretrain_proj_path}, using random init")
+        assert method_config.get("date_vocab_size", 0) == 0, (
+            "Context is enabled (date_vocab_size > 0) but context_codes is None. "
+            "Ensure context_tokenization='rqvae' is set in the dataset config and that "
+            "context codes were successfully produced by the RQ-VAE pipeline."
+        )
 
     total_steps = trainer_config["steps"]
     batch_size = trainer_config["batch_size"]
@@ -996,18 +698,9 @@ def train_tiger(
         embedding_head_dict=method_config["embedding_head_dict"],
     ).to(device)
 
-    # Re-attach context to test model (same logic as training model)
+    # Re-attach RQ-VAE tokenized context to test model
     if context_codes is not None:
         model.context_codes = context_codes.to(device)
-        model.context_embedding = None
-        model.context_proj = None
-    elif encoded_context is not None:
-        model.context_codes = None
-        model.context_embedding = encoded_context.to(device)
-        if model.context_proj is None:
-            model.context_proj = torch.nn.Linear(
-                encoded_context.shape[-1], model_config.d_model
-            ).to(device)
     else:
         model.context_codes = None
 

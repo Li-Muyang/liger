@@ -1,17 +1,24 @@
-# Yelp Oracle dataset configuration
-# Uses real timestamps + oracle date-category context from statistical analysis
+# Yelp Daytime dataset configuration
+# Uses real timestamps + LLM-generated date+timebin context (morning/afternoon/evening/night)
 # Context is tokenized via RQ-VAE (same codebook as items) → multi-token prepend
 
 # data preprocessing
-type: Yelp_oracle
+type: Yelp_daytime
 name: Yelp
 raw_data_path: ./ID_generation/preprocessing/raw_data/
 processed_data_path: ./ID_generation/preprocessing/processed/
 context_embedding_save_path: ./ID_generation/preprocessing/processed/
 
-# Oracle context: generated from date-category lift analysis
-# Will be auto-generated if not present
-date_context_file: ./ID_generation/preprocessing/raw_data/Yelp/Yelp_oracle_date_context.jsonl
+# Daytime context: LLM-generated from batch query (date+timebin granularity)
+# Run extract_daytime_context.py to generate this from Bedrock batch output
+date_context_file: ./ID_generation/preprocessing/raw_data/Yelp/Yelp_daytime_date_context.jsonl
+
+# Business metadata for timezone conversion (business_id → state)
+# Will be auto-generated from Yelp business dataset if not present
+business_file: /Users/limuyang/Downloads/yelp2020/yelp_academic_dataset_business.json
+
+# Code name for context variant (controls context cache naming for ablations)
+code: "llm_v1"
 
 # Use RQ-VAE tokenization for context (multi-token, shared codebook with items)
 context_tokenization: rqvae
@@ -50,7 +57,7 @@ RQ-VAE:
 
 # TIGER model configuration
 TIGER:
-  n_positions: 202  # slightly larger to accommodate context tokens prepended
+  n_positions: 202  # larger to accommodate context tokens prepended
   save_every_n_epochs: 10
   T5:
     encoder_layers: 6

@@ -17,13 +17,11 @@ import json
 from datetime import datetime
 
 def load_date_context(
-    filepath="/home/ec2-user/recsys/liger/ID_generation/preprocessing/raw_data/amazon/amazon_beauty_date_context.jsonl",
+    filepath=None,
     mapping_save_path=None,
 ):
-    # Handle None or "null" filepath (when context is disabled)
     if filepath is None or filepath == "null" or filepath == "":
         return {}, None
-    
     date_context = {}
     with open(filepath, "r") as f:
         for line in f:
@@ -50,7 +48,13 @@ def load_date_context(
         if mapping_save_path:
             with open(mapping_save_path, "w") as f:
                 json.dump(date2id, f)
-
+    assert len(ordered_context) == len(date2id), (
+        f"ordered_context length ({len(ordered_context)}) != date2id length ({len(date2id)}). "
+        f"Some date keys in the mapping may be missing from the context file."
+    )
+    assert all(v > 0 for v in date2id.values()), (
+        "date2id values must be positive (1-indexed)."
+    )
     return ordered_context, date2id
 
 
@@ -218,6 +222,47 @@ def generate_input_sequence(
     )
 
 
+# Time bins for daytime context (same as Yelp_daytime in data_process.py)
+_TIME_BINS = {"morning": (6, 11), "afternoon": (11, 17), "evening": (17, 22), "night": (22, 6)}
+_DEFAULT_UTC_OFFSET = -6
+
+
+def _get_time_bin(hour):
+    for name, (start, end) in _TIME_BINS.items():
+        if start < end:
+            if start <= hour < end:
+                return name
+        else:
+            if hour >= start or hour < end:
+                return name
+    return "night"
+
+
+def _load_item_offsets(method_config):
+    """Auto-load per-item UTC offsets from disk if the file exists."""
+    path = method_config.get("item_offsets_path", "")
+    if path and os.path.exists(path):
+        with open(path, "r") as f:
+            offsets = json.load(f)
+        print(f"Loaded item UTC offsets from {path} ({len(offsets)} items)")
+        return offsets
+    return None
+
+
+def _timestamp_to_daytime_key(timestamp, item_id, item_offsets):
+    """Convert unix timestamp to 'YYYY-MM-DD_timebin' using per-item UTC offset."""
+    from datetime import timedelta as _td
+    assert str(item_id) in item_offsets, (
+        f"UTC offset missing for item {item_id}. "
+        f"All items must have offsets when using daytime context mode."
+    )
+    offset = item_offsets.get(str(item_id), _DEFAULT_UTC_OFFSET)
+    local_dt = datetime.utcfromtimestamp(int(timestamp)) + _td(hours=offset)
+    date_str = local_dt.strftime("%Y-%m-%d")
+    tbin = _get_time_bin(local_dt.hour)
+    return f"{date_str}_{tbin}"
+
+
 def load_data_helper(
     user_sequence,
     user_ids,
@@ -235,6 +280,9 @@ def load_data_helper(
     date2id=None,
     ooc_config=None,
 ):
+    # Auto-load item UTC offsets for daytime key conversion (produced by Yelp_daytime preprocessing)
+    item_offsets = _load_item_offsets(method_config)
+
     # OOC (Out-of-Context) configuration for temporal generalization testing
     do_ooc = ooc_config is not None and ooc_config.get("enabled", False)
     ooc_threshold = ooc_config.get("threshold", "2014-07-01") if do_ooc else None
@@ -280,25 +328,35 @@ def load_data_helper(
         if user_timestamps is not None:
             user_id_key = user_ids[i] if user_ids is not None else str(i + 1)
             user_id_key = str(user_id_key)
-            if user_id_key in user_timestamps:
-                user_ts = user_timestamps[user_id_key]
-                seq_len = len(user_sequence[i])
-                if len(user_ts) > seq_len:
-                    user_ts = user_ts[-seq_len:]
-                elif len(user_ts) < seq_len:
-                    raise ValueError(
-                        f"user_timestamps length mismatch for user {user_id_key}: "
-                        f"{len(user_ts)} vs {seq_len}"
-                    )
-                if date2id is not None:
-                    user_date_ids = []
-                    for ts in user_ts:
+            assert user_id_key in user_timestamps, (
+                f"Timestamps missing for user {user_id_key}. "
+                f"All users must have timestamp data when user_timestamps is provided."
+            )
+            user_ts = user_timestamps[user_id_key]
+            seq_len = len(user_sequence[i])
+            if len(user_ts) > seq_len:
+                user_ts = user_ts[-seq_len:]
+            elif len(user_ts) < seq_len:
+                raise ValueError(
+                    f"user_timestamps length mismatch for user {user_id_key}: "
+                    f"{len(user_ts)} vs {seq_len}"
+                )
+            if date2id is not None:
+                user_date_ids = []
+                user_items = user_sequence[i]
+                for idx_ts, ts in enumerate(user_ts):
+                    if item_offsets is not None:
+                        # Fine-grained: convert to "YYYY-MM-DD_timebin" using item UTC offset
+                        item_id = user_items[idx_ts] if idx_ts < len(user_items) else None
+                        date_key = _timestamp_to_daytime_key(ts, item_id, item_offsets)
+                    else:
+                        # Date-level fallback (oracle / amazon)
                         date_key = _timestamp_to_date_key(ts)
-                        if date_key not in date2id:
-                            raise KeyError(
-                                f"Missing date key {date_key} in date2id mapping."
-                            )
-                        user_date_ids.append(date2id[date_key])
+                    if date_key not in date2id:
+                        raise KeyError(
+                            f"Missing date key {date_key} in date2id mapping."
+                        )
+                    user_date_ids.append(date2id[date_key])
 
         # user sequence = [1,2,3,4,5]
         # train: j = 2,3 => [1,2], [1,2,3]

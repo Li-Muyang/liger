@@ -14,7 +14,7 @@ import os
 import re
 import statistics
 from collections import Counter, defaultdict
-from datetime import datetime
+from datetime import datetime, timedelta
 from glob import glob
 
 import numpy as np
@@ -275,6 +275,103 @@ class Yelp_oracle(Yelp):
 
         print(f"Generated oracle context for {len(lines)} dates → {output_path}")
         return output_path
+
+
+class Yelp_daytime(Yelp_oracle):
+    """
+    Yelp dataset with fine-grained daytime context (morning/afternoon/evening/night).
+    Extends Yelp_oracle to convert unix timestamps to local time using business
+    state → UTC offset, then bin into time-of-day periods.
+    """
+
+    STATE_TO_UTC_OFFSET = {
+        "AL": -6, "CT": -5, "DE": -5, "FL": -5, "GA": -5, "IN": -5,
+        "KY": -5, "MA": -5, "MD": -5, "ME": -5, "MI": -5, "NC": -5,
+        "NH": -5, "NJ": -5, "NY": -5, "OH": -5, "PA": -5, "RI": -5,
+        "SC": -5, "TN": -6, "VA": -5, "VT": -5, "WV": -5,
+        "AR": -6, "IA": -6, "IL": -6, "KS": -6, "LA": -6, "MN": -6,
+        "MO": -6, "MS": -6, "ND": -6, "NE": -6, "OK": -6, "SD": -6,
+        "TX": -6, "WI": -6,
+        "AZ": -7, "CO": -7, "ID": -7, "MT": -7, "NM": -7, "UT": -7, "WY": -7,
+        "CA": -8, "NV": -8, "OR": -8, "WA": -8,
+        "AK": -9, "HI": -10,
+        "AB": -7, "BC": -8, "MB": -6, "NB": -4, "NL": -4, "NS": -4,
+        "NT": -7, "ON": -5, "PE": -4, "QC": -5, "SK": -6, "YT": -8,
+    }
+    DEFAULT_UTC_OFFSET = -6
+
+    TIME_BINS = {
+        "morning":   (6, 11),
+        "afternoon": (11, 17),
+        "evening":   (17, 22),
+        "night":     (22, 6),
+    }
+
+    def __init__(self, root, business_file=None):
+        super().__init__(root)
+        self.business_file = business_file
+        self.biz_offset = {}  # business_id → UTC offset hours
+
+    def load_business_offsets(self, item_ids=None):
+        """Load business_id → UTC offset from Yelp business dataset."""
+        if not self.business_file or not os.path.exists(self.business_file):
+            print(f"WARNING: business_file not found: {self.business_file}")
+            return
+        print(f"Loading business timezone offsets from {self.business_file}")
+        with open(self.business_file, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                r = json.loads(line)
+                bid = r.get("business_id", "")
+                if item_ids is not None and bid not in item_ids:
+                    continue
+                state = (r.get("state", "") or "").strip().upper()
+                self.biz_offset[bid] = self.STATE_TO_UTC_OFFSET.get(
+                    state, self.DEFAULT_UTC_OFFSET
+                )
+        print(f"  Loaded offsets for {len(self.biz_offset)} businesses")
+
+    @staticmethod
+    def _get_time_bin(hour):
+        for name, (start, end) in Yelp_daytime.TIME_BINS.items():
+            if start < end:
+                if start <= hour < end:
+                    return name
+            else:  # wraps midnight
+                if hour >= start or hour < end:
+                    return name
+        return "night"
+
+    def compute_daytime_keys(self, user_items_id, user_timestamps_id, data_maps):
+        """
+        Compute per-interaction daytime context keys: "YYYY-MM-DD_timebin".
+        
+        Args:
+            user_items_id: {mapped_user_id: [mapped_item_id, ...]}
+            user_timestamps_id: {mapped_user_id: [unix_ts, ...]}
+            data_maps: contains id2item for reverse mapping
+            
+        Returns:
+            {mapped_user_id: ["2019-01-01_night", "2019-01-02_morning", ...]}
+        """
+        id2item = data_maps["id2item"]
+        user_daytime_keys = {}
+
+        for uid, items in user_items_id.items():
+            ts_list = user_timestamps_id.get(uid, [])
+            keys = []
+            for item_id_str, ts in zip(items, ts_list):
+                raw_item = id2item.get(item_id_str, item_id_str)
+                offset = self.biz_offset.get(raw_item, self.DEFAULT_UTC_OFFSET)
+                local_dt = datetime.utcfromtimestamp(int(ts)) + timedelta(hours=offset)
+                date_key = local_dt.strftime("%Y-%m-%d")
+                tbin = self._get_time_bin(local_dt.hour)
+                keys.append(f"{date_key}_{tbin}")
+            user_daytime_keys[uid] = keys
+
+        return user_daytime_keys
 
 
 class Amazon:
@@ -947,6 +1044,10 @@ def preprocessing_each_dataset(config, dataset_name):
         if not os.path.exists(oracle_context_path):
             print("Oracle context not found, generating...")
             dataset.generate_oracle_context(None, oracle_context_path)
+    elif data_type == "Yelp_daytime":
+        business_file = config.get("business_file", None)
+        dataset = Yelp_daytime(raw_data_path, business_file=business_file)
+        datas = dataset.process()
     else:
         raise NotImplementedError
 
@@ -1020,7 +1121,7 @@ def preprocessing_each_dataset(config, dataset_name):
             attribute_core,
             prompt_format,
         )
-    elif data_type in ("Yelp", "Yelp_oracle"):
+    elif data_type in ("Yelp", "Yelp_oracle", "Yelp_daytime"):
         meta_infos = dataset.process_meta(data_maps)
         # Yelp doesn't have brand/genre attributes like Amazon/Steam
         # Skip attribute extraction, just create id2meta mapping
@@ -1058,5 +1159,23 @@ def preprocessing_each_dataset(config, dataset_name):
     json_str = json.dumps(item2attributes)
     with open(item2attributes_file, "w") as out:
         out.write(json_str)
+
+    # For Yelp_daytime: save per-item UTC offsets so load_data can convert timestamps on-the-fly
+    if data_type == "Yelp_daytime":
+        offsets_file = os.path.join(processed_data_path, f"{dataset_name}_{data_type}_item_utc_offsets.json")
+        if not os.path.exists(offsets_file):
+            all_raw_items = set(data_maps["item2id"].keys())
+            dataset.load_business_offsets(item_ids=all_raw_items)
+            # Map: mapped_item_id → UTC offset
+            item_offsets = {}
+            for raw_id, mapped_id in data_maps["item2id"].items():
+                item_offsets[mapped_id] = dataset.biz_offset.get(
+                    raw_id, dataset.DEFAULT_UTC_OFFSET
+                )
+            with open(offsets_file, "w") as f:
+                json.dump(item_offsets, f)
+            print(f"Saved item UTC offsets for {len(item_offsets)} items → {offsets_file}")
+        else:
+            print(f"Item UTC offsets already exist: {offsets_file}")
 
     return data_file, id2meta_file, item2attributes_file, user_timestamps_id

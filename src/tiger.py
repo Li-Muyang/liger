@@ -102,10 +102,6 @@ class TIGER(T5ForConditionalGeneration):
                 config.d_model, eps=config.layer_norm_epsilon
             )
 
-        # context_proj is created dynamically in training.py based on actual
-        # encoded_context dimensions (which depend on encoding method, e.g., RQ-VAE encoder)
-        self.context_proj = None
-
         self.n_semantic_codebook = n_semantic_codebook
         self.semantic_pos = nn.Embedding(n_semantic_codebook + 1, config.d_model)
         self.pos_embedding = nn.Embedding(max_items_per_seq, config.d_model)

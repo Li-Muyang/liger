@@ -18,11 +18,8 @@ def _get_context_embeds(model, batch, device, method_config):
     """
     Get context embeddings to prepend to encoder input.
     
-    Supports two modes:
-    1. RQ-VAE tokenized (new): context_codes stored on model → look up in model.shared
-       Returns: [batch, n_codebook, d_model] (multiple tokens)
-    2. Continuous (old): context_embedding + context_proj → single projected token
-       Returns: [batch, 1, d_model]
+    Uses RQ-VAE tokenized context: context_codes stored on model → look up in model.shared.
+    Returns: [batch, n_codebook, d_model] (multiple tokens)
     
     Returns None if no context is available for this batch.
     """
@@ -38,7 +35,7 @@ def _get_context_embeds(model, batch, device, method_config):
     use_tokenized = method_config.get("context_tokenization") == "rqvae"
     
     if use_tokenized and hasattr(model, "context_codes") and model.context_codes is not None:
-        # NEW: RQ-VAE tokenized context → multiple tokens from shared embedding
+        # RQ-VAE tokenized context → multiple tokens from shared embedding
         context_codes = model.context_codes  # [N_dates, n_codebook]
         if context_codes.device != device:
             context_codes = context_codes.to(device)
@@ -47,23 +44,6 @@ def _get_context_embeds(model, batch, device, method_config):
         # Embed via shared T5 embedding table (same as items)
         context_embeds = model.shared(date_codes)  # [batch, n_codebook, d_model]
         return context_embeds
-    
-    elif hasattr(model, "context_embedding") and model.context_embedding is not None:
-        # OLD: Continuous context → single projected token
-        context_embedding = model.context_embedding
-        if context_embedding.device != device:
-            context_embedding = context_embedding.to(device)
-        if context_embedding.shape[0] < method_config["date_vocab_size"]:
-            raise ValueError("context_embedding size is smaller than date vocab size.")
-        
-        date_desc = context_embedding[label_date_ids - 1]
-        context_proj = getattr(model, "context_proj", None)
-        if context_proj is not None:
-            return context_proj(date_desc)[:, None, :]  # [batch, 1, d_model]
-        elif hasattr(model, "emb_proj"):
-            return model.emb_proj(date_desc)[:, None, :]
-        else:
-            raise AttributeError("Model has no context projection layer.")
     
     return None
 
